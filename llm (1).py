@@ -1,6 +1,6 @@
 """
 llm.py — XoltaOS LLM Layer
-Cohere-first, multi-provider ready.
+Cohere-only for now. Multi-provider support will be added later.
 Clean JSON parsing, proper error handling, no fake fallbacks.
 """
 
@@ -16,17 +16,14 @@ load_dotenv(override=True)
 
 logger = logging.getLogger(__name__)
 
-COHERE_API_KEY   = os.getenv("COHERE_API_KEY")
-OPENAI_API_KEY   = os.getenv("OPENAI_API_KEY")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+COHERE_API_KEY = os.getenv("COHERE_API_KEY")
+
 
 # ═══════════════════════════════════════════════════
-# LAZY CLIENT INIT — only creates clients when needed
+# LAZY CLIENT INIT
 # ═══════════════════════════════════════════════════
 
-_cohere_client    = None
-_openai_client    = None
-_anthropic_client = None
+_cohere_client = None
 
 def _init_cohere():
     global _cohere_client
@@ -37,27 +34,9 @@ def _init_cohere():
         _cohere_client = cohere.Client(COHERE_API_KEY)
     return _cohere_client
 
-def _init_openai():
-    global _openai_client
-    if not _openai_client:
-        if not OPENAI_API_KEY:
-            raise RuntimeError("OPENAI_API_KEY not set in .env")
-        from openai import OpenAI
-        _openai_client = OpenAI(api_key=OPENAI_API_KEY)
-    return _openai_client
-
-def _init_anthropic():
-    global _anthropic_client
-    if not _anthropic_client:
-        if not ANTHROPIC_API_KEY:
-            raise RuntimeError("ANTHROPIC_API_KEY not set in .env")
-        import anthropic
-        _anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    return _anthropic_client
-
 
 # ═══════════════════════════════════════════════════
-# MODEL REGISTRY
+# MODEL REGISTRY — Cohere only
 # ═══════════════════════════════════════════════════
 
 AVAILABLE_MODELS = {
@@ -82,30 +61,6 @@ AVAILABLE_MODELS = {
     "cohere-a": {
         "provider": "cohere",
         "model": "command-a-03-2025",
-        "speed": "medium",
-        "cost": "medium"
-    },
-    "gpt-4o-mini": {
-        "provider": "openai",
-        "model": "gpt-4o-mini",
-        "speed": "fast",
-        "cost": "low"
-    },
-    "gpt-4o": {
-        "provider": "openai",
-        "model": "gpt-4o",
-        "speed": "medium",
-        "cost": "high"
-    },
-    "claude-haiku": {
-        "provider": "anthropic",
-        "model": "claude-3-haiku-20240307",
-        "speed": "fast",
-        "cost": "low"
-    },
-    "claude-sonnet": {
-        "provider": "anthropic",
-        "model": "claude-3-5-sonnet-20241022",
         "speed": "medium",
         "cost": "medium"
     },
@@ -169,7 +124,7 @@ def reset_model_config():
 
 
 # ═══════════════════════════════════════════════════
-# JSON CLEANING — handles all real LLM noise
+# JSON CLEANING
 # ═══════════════════════════════════════════════════
 
 def clean_json(text: str) -> str:
@@ -178,10 +133,8 @@ def clean_json(text: str) -> str:
     Handles: markdown fences, preamble text, trailing commentary.
     """
     text = text.strip()
-    # Strip markdown fences anywhere in the string
     text = re.sub(r"```(?:json)?\s*", "", text, flags=re.IGNORECASE).strip()
     text = re.sub(r"```", "", text).strip()
-    # Extract the first complete JSON object or array
     match = re.search(r'(\{.*\}|\[.*\])', text, re.DOTALL)
     if match:
         return match.group(1).strip()
@@ -208,36 +161,27 @@ def safe_json_parse(raw: str) -> dict:
 
 def call_llm(role: str, prompt: str, retries: int = 2) -> str:
     """
-    Route prompt to correct provider and return raw response.
+    Route prompt to Cohere and return raw response.
     Raises RuntimeError if all retries fail — never returns fake data.
     """
     if role not in MODEL_ROUTING:
         raise ValueError(f"Unknown role: {role}")
 
-    config     = MODEL_ROUTING[role]
-    model_key  = config["model_key"]
-    model_info = AVAILABLE_MODELS[model_key]
-    provider   = model_info["provider"]
-    model_name = model_info["model"]
+    config      = MODEL_ROUTING[role]
+    model_key   = config["model_key"]
+    model_info  = AVAILABLE_MODELS[model_key]
+    model_name  = model_info["model"]
     temperature = config["temperature"]
 
     last_error = None
     for attempt in range(retries + 1):
         try:
-            if provider == "cohere":
-                result = _call_cohere(model_name, prompt, temperature)
-            elif provider == "openai":
-                result = _call_openai(model_name, prompt, temperature)
-            elif provider == "anthropic":
-                result = _call_anthropic(model_name, prompt, temperature)
-            else:
-                raise ValueError(f"Unknown provider: {provider}")
+            result = _call_cohere(model_name, prompt, temperature)
 
-            # Clean JSON for structured roles
             if role not in PROSE_ROLES:
                 result = clean_json(result)
 
-            logger.debug(f"[{role.upper()}] {provider}/{model_key} OK — {len(result)} chars")
+            logger.debug(f"[{role.upper()}] cohere/{model_key} OK — {len(result)} chars")
             return result
 
         except Exception as e:
@@ -250,7 +194,7 @@ def call_llm(role: str, prompt: str, retries: int = 2) -> str:
 
 
 # ═══════════════════════════════════════════════════
-# PROVIDER IMPLEMENTATIONS
+# COHERE IMPLEMENTATION
 # ═══════════════════════════════════════════════════
 
 def _call_cohere(model: str, prompt: str, temperature: float) -> str:
@@ -263,29 +207,9 @@ def _call_cohere(model: str, prompt: str, temperature: float) -> str:
     )
     return response.text.strip()
 
-def _call_openai(model: str, prompt: str, temperature: float) -> str:
-    client = _init_openai()
-    response = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=temperature,
-        max_tokens=3000
-    )
-    return response.choices[0].message.content.strip()
-
-def _call_anthropic(model: str, prompt: str, temperature: float) -> str:
-    client = _init_anthropic()
-    response = client.messages.create(
-        model=model,
-        max_tokens=3000,
-        temperature=temperature,
-        messages=[{"role": "user", "content": prompt}]
-    )
-    return response.content[0].text.strip()
-
 
 # ═══════════════════════════════════════════════════
-# EMBEDDINGS — Cohere only for now
+# EMBEDDINGS — Cohere only
 # ═══════════════════════════════════════════════════
 
 def generate_embedding(text: str) -> list:
@@ -335,3 +259,4 @@ def call_knowledge_retriever(prompt):  return call_llm("knowledge_retriever", pr
 def call_knowledge_linker(prompt):     return call_llm("knowledge_linker", prompt)
 def call_insight_generator(prompt):    return call_llm("insight_generator", prompt)
 def call_deduplicator(prompt):         return call_llm("deduplicator", prompt)
+
