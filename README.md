@@ -1,4 +1,20 @@
 # Xoltra
+Xoltra is an AI-powered automation and productivity platform designed to help individuals and businesses eliminate repetitive tasks and reclaim their time — no technical expertise required.
+Core Features:
+1. AI-Assisted Workflow Builder
+A node-based automation system (like n8n) where users can build complex workflows entirely through natural language. No prior knowledge of automation tools needed — the AI builds, connects, and explains every node.
+2. Role-Based AI Personas
+Switchable AI roles tailored to specific use cases — teachers, business analysts, coaches, and more. Each role can be customised and updated to match the user's needs.
+3. Unity Simulation Integration
+A real-time simulation layer powered by Unity that allows the AI to manipulate source data visually, giving users a precise and interactive way to learn and validate outputs.
+4. Persistent Knowledge Base
+Automatically summarises and stores insights from past conversations locally. The system builds a personal knowledge graph over time — understanding your patterns, preferences, and communication style to respond in a way that makes sense specifically to you.
+5. Permissioned Web & App Integration
+With explicit user consent, Xoltra can connect to selected websites and tools via API — reading and manipulating data the same way you would manually. Native integration with the workflow builder extends this to hundreds of services.
+6. Adaptive Multi-Model Routing
+Automatically selects the right AI model(s) based on the complexity of the task — lightweight models for simple queries, more powerful ones for deep reasoning — balancing speed, cost, and quality.
+7. Continuous Updates & Tiered Access
+Regular feature updates keep the platform current. A tier system gives users access to progressively more powerful features — details of the business model are still being defined.
 
 A Python project.
 
