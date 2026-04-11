@@ -1,297 +1,488 @@
-"""pipeline.py — XoltaOS execution pipeline."""
+"""
+pipeline.py — XoltaOS Pipeline Orchestrator
+
+Tier system (auto-selected by Router):
+  ⚡ Fast     (simple)  → Router → QA
+  ⚖ Standard (medium)  → Router → Clarifier → Architect → Critic → Validator → Compiler
+  🧠 Deep     (complex) → All 14 agents
+
+Router runs first, calls apply_tier(complexity), then the pipeline
+checks is_agent_active() before running each agent — inactive agents
+are skipped silently. This means adding a new tier in llm.py is all
+that's needed — no pipeline logic changes required.
+"""
 
 import logging
-from typing import Optional, Dict, List
+import threading
+from typing import Optional, Callable
 
-import roles
-import knowledge_db as kdb
-import knowledge_agent
 from agents import (
-    RouterAgent,
-    ClarifierAgent,
-    PDFExtractorAgent,
-    ArchitectAgent,
-    CriticAgent,
-    OperatorAgent,
-    ValidatorAgent,
-    CompilerAgent,
-    QAAgent,
+    RouterAgent, ClarifierAgent, ArchitectAgent,
+    CriticAgent, OperatorAgent, AuditorAgent,
+    ValidatorAgent, CompilerAgent, PDFExtractorAgent, QAAgent
 )
+from roles import get_role_preamble
+from llm import apply_tier, is_agent_active, get_active_tier
 
 logger = logging.getLogger(__name__)
 
-class Pipeline:
+try:
+    import knowledge_db as kdb
+    import knowledge_agent as ka
+    KNOWLEDGE_AVAILABLE = True
+except ImportError:
+    KNOWLEDGE_AVAILABLE = False
+    logger.info("[Pipeline] Knowledge Engine not available — running without it")
+
+
+# ═══════════════════════════════════════════════════
+# RESULT HELPERS
+# ═══════════════════════════════════════════════════
+
+def _base_result(mode="default", role_id="default", complexity="medium") -> dict:
+    return {
+        "success":           False,
+        "output":            None,
+        "output_parsed":     None,
+        "extracted_goal":    None,
+        "critic_status":     None,
+        "critic_issues":     [],
+        "operator_used":     False,
+        "validation":        None,
+        "agents_used":       [],
+        "mode":              mode,
+        "role_id":           role_id,
+        "complexity":        complexity,
+        "tier":              get_active_tier()["label"],
+        "error":             None,
+        "knowledge_used":    False,
+        "knowledge_context": None,
+    }
+
+def _error_result(msg, mode="default", role_id="default", complexity="medium") -> dict:
+    r = _base_result(mode, role_id, complexity)
+    r["error"] = msg
+    return r
+
+
+# ═══════════════════════════════════════════════════
+# PIPELINE
+# ═══════════════════════════════════════════════════
+
+class WorkflowPipeline:
+
     def __init__(self):
-        kdb.init_storage()
-        self.router = RouterAgent()
+        self.router    = RouterAgent()
         self.clarifier = ClarifierAgent()
-        self.extractor = PDFExtractorAgent()
         self.architect = ArchitectAgent()
-        self.critic = CriticAgent()
-        self.operator = OperatorAgent()
+        self.critic    = CriticAgent()
+        self.operator  = OperatorAgent()
+        self.auditor   = AuditorAgent()
         self.validator = ValidatorAgent()
-        self.compiler = CompilerAgent()
-        self.qa = QAAgent()
+        self.compiler  = CompilerAgent()
+        self.extractor = PDFExtractorAgent()
+        self.qa        = QAAgent()
 
-    def get_clarifications(self, goal: str, role_id: str = "default") -> Dict:
-        role_preamble = roles.get_role_preamble(role_id)
-        if not goal or not goal.strip():
-            return {"mode": "default", "questions": []}
+        self.knowledge_enabled = KNOWLEDGE_AVAILABLE
+        if self.knowledge_enabled:
+            kdb.init_storage()
 
+        logger.info(f"[Pipeline] Initialized (Knowledge: {'ON' if self.knowledge_enabled else 'OFF'})")
+
+    # ─────────────────────────────────────────────
+    # INTERNAL: route + apply tier
+    # ─────────────────────────────────────────────
+    def _route(self, text: str, role_preamble: Optional[str] = None) -> dict:
+        """
+        Runs Router then immediately applies the matching tier.
+        Every pipeline entry point calls this first.
+        """
         try:
-            response = self.clarifier.run(goal.strip(), role_preamble=role_preamble)
-            if not isinstance(response, dict):
-                raise ValueError("Clarifier returned invalid response")
-            mode = response.get("mode", "default")
-            questions = response.get("questions", [])
-            if not isinstance(questions, list):
-                questions = []
-            if mode not in ("default", "coach"):
-                mode = "default"
-            return {"mode": mode, "questions": questions}
-        except Exception as exc:
-            logger.warning(f"[Pipeline] Clarification failed: {exc}")
-            return {"mode": "default", "questions": []}
+            router_data = self.router.run(text, role_preamble=role_preamble)
+        except Exception as e:
+            logger.error(f"[Pipeline] Router failed: {e} — defaulting to medium")
+            router_data = {
+                "complexity":          "medium",
+                "mode":                "default",
+                "pipeline_depth":      "standard",
+                "needs_clarification": False,
+            }
 
-    def run(
-        self,
-        goal: str,
-        mode: str = "default",
-        answers: Optional[Dict] = None,
-        role_id: str = "default",
-        on_step=None,
-    ) -> Dict:
-        role_preamble = roles.get_role_preamble(role_id)
-        answers = answers or {}
-        result = {
-            "success": False,
-            "output": "",
-            "output_parsed": None,
-            "mode": mode,
-            "role_id": role_id,
-            "critic_status": "pass",
-            "operator_used": False,
-            "critic_issues": [],
-            "error": None,
+        complexity = router_data.get("complexity", "medium")
+        apply_tier(complexity)   # ← upgrades/downgrades all agent models + active set
+
+        tier = get_active_tier()
+        logger.info(f"[Pipeline] {tier['label']} tier active — {tier['agent_count']} agents")
+
+        return router_data
+
+    # ─────────────────────────────────────────────
+    # PUBLIC: get clarifying questions
+    # ─────────────────────────────────────────────
+    def get_clarifications(self, goal: str, role_id: str = "default") -> dict:
+        preamble    = get_role_preamble(role_id)
+        router_data = self._route(goal, role_preamble=preamble)
+
+        mode       = router_data.get("mode", "default")
+        complexity = router_data.get("complexity", "medium")
+        needs      = router_data.get("needs_clarification", False)
+
+        questions = []
+        if needs and is_agent_active("clarifier"):
+            try:
+                questions = self.clarifier.run(goal, role_preamble=preamble).get("questions", [])
+            except Exception as e:
+                logger.warning(f"[Pipeline] Clarifier failed: {e}")
+
+        return {
+            "needs_clarification": needs,
+            "questions":           questions,
+            "mode":                mode,
+            "complexity":          complexity,
+            "tier":                get_active_tier()["label"],
+            "role_id":             role_id,
+            "router":              router_data,
         }
 
-        if not goal or not goal.strip():
-            result["error"] = "Goal is required"
-            return result
+    # ─────────────────────────────────────────────
+    # PUBLIC: run goal pipeline
+    # ─────────────────────────────────────────────
+    def run(self, goal: str, mode: str = "default", answers: dict = None,
+            on_step: Callable = None, role_id: str = "default") -> dict:
 
-        clarified_goal = self._prepare_clarified_goal(goal, answers)
-        if on_step:
-            on_step("goal_saved")
+        preamble    = get_role_preamble(role_id)
+        router_data = self._route(goal, role_preamble=preamble)
+        complexity  = router_data.get("complexity", "medium")
+
+        enriched_goal = goal
+        if answers:
+            lines = [
+                f"- {k.replace('_', ' ').title()}: {v}"
+                for k, v in answers.items() if v and v.strip()
+            ]
+            if lines:
+                enriched_goal = f"{goal}\n\nAdditional context:\n" + "\n".join(lines)
+
+        return self._run_pipeline(
+            enriched_goal, mode=mode, on_step=on_step,
+            role_preamble=preamble, role_id=role_id, complexity=complexity
+        )
+
+    # ─────────────────────────────────────────────
+    # PUBLIC: run document pipeline
+    # ─────────────────────────────────────────────
+    def run_from_document(self, raw_text: str, on_step: Callable = None,
+                          role_id: str = "default") -> dict:
+        preamble = get_role_preamble(role_id)
+
+        def step(name):
+            logger.info(f"[Pipeline] {name}")
+            if on_step: on_step(name)
+
+        step("Extractor")
+        try:
+            extracted_goal = self.extractor.run(raw_text, role_preamble=preamble)
+        except Exception as e:
+            return _error_result(f"Extractor failed: {e}", role_id=role_id)
+
+        if not extracted_goal or not extracted_goal.strip():
+            return _error_result("Extractor returned empty goal", role_id=role_id)
+
+        router_data = self._route(extracted_goal, role_preamble=preamble)
+        mode        = router_data.get("mode", "default")
+        complexity  = router_data.get("complexity", "medium")
+
+        result = self._run_pipeline(
+            extracted_goal, mode=mode, on_step=on_step,
+            role_preamble=preamble, role_id=role_id, complexity=complexity
+        )
+        result["extracted_goal"] = extracted_goal
+
+        if self.knowledge_enabled and result.get("success"):
+            try:
+                doc_id   = kdb.create_node(
+                    node_type="document",
+                    content={"source_type": "text", "extracted_goal": extracted_goal}
+                )
+                doc_node = kdb.get_node(doc_id, update_access=False)
+                ka.auto_link_node(doc_id, doc_node)
+                result["document_node_id"] = doc_id
+            except Exception as e:
+                logger.warning(f"[Pipeline] Could not store document: {e}")
+
+        return result
+
+    # ─────────────────────────────────────────────
+    # PUBLIC: adaptive Q&A
+    # ─────────────────────────────────────────────
+    def run_adaptive(self, user_input: str, on_step: Callable = None,
+                     role_id: str = "default") -> dict:
+        preamble    = get_role_preamble(role_id)
+        router_data = self._route(user_input, role_preamble=preamble)
+
+        mode       = router_data.get("mode", "default")
+        complexity = router_data.get("complexity", "medium")
+
+        def step(name):
+            logger.info(f"[Pipeline] {name}")
+            if on_step: on_step(name)
+
+        # ⚡ Fast + ⚖ Standard → QA agent only for adaptive
+        if complexity in ("simple", "medium"):
+            step("QA")
+            try:
+                answer = self.qa.run(
+                    user_input, complexity=complexity,
+                    mode=mode, role_preamble=preamble
+                )
+                return {
+                    "success":    True,
+                    "output":     answer,
+                    "mode":       mode,
+                    "role_id":    role_id,
+                    "complexity": complexity,
+                    "tier":       get_active_tier()["label"],
+                    "agents_used": ["router", "qa"],
+                    "error":      None,
+                }
+            except Exception as e:
+                return _error_result(f"QA failed: {e}", mode, role_id, complexity)
+
+        # 🧠 Deep → full pipeline
+        return self._run_pipeline(
+            user_input, mode=mode, on_step=on_step,
+            role_preamble=preamble, role_id=role_id, complexity=complexity
+        )
+
+    # ─────────────────────────────────────────────
+    # INTERNAL: core pipeline with tier gating
+    # ─────────────────────────────────────────────
+    def _run_pipeline(self, goal: str, mode: str = "default",
+                      on_step: Callable = None,
+                      role_preamble: Optional[str] = None,
+                      role_id: str = "default",
+                      complexity: str = "medium") -> dict:
+
+        def step(name):
+            logger.info(f"[Pipeline] {name}")
+            if on_step: on_step(name)
+
+        result = _base_result(mode, role_id, complexity)
 
         try:
-            kdb.create_node(
-                node_type="goal",
-                content={
-                    "original_input": goal.strip(),
-                    "clarified_goal": clarified_goal,
-                    "answers": answers,
-                },
-            )
-        except Exception as exc:
-            logger.warning(f"[Pipeline] Goal storage failed: {exc}")
+            # ─── KNOWLEDGE (Deep tier only) ───────────────
+            context_nodes = None
+            if self.knowledge_enabled and is_agent_active("knowledge_retriever"):
+                step("Knowledge check")
+                try:
+                    dup_check = ka.check_before_create(goal)
 
-        context_nodes = knowledge_agent.get_context_for_pipeline(clarified_goal)
+                    if dup_check["action"] == "reuse":
+                        existing = dup_check["existing_node"]
+                        edges    = kdb.get_node_edges(
+                            existing["id"], direction="incoming", edge_type="derives_from"
+                        )
+                        if edges:
+                            workflow = kdb.get_node(edges[0]["from_node"], update_access=True)
+                            if workflow:
+                                result["knowledge_used"] = True
+                                result["output_parsed"]  = workflow["content"]
+                                result["output"] = (
+                                    f"## REUSING EXISTING PLAN\n\n"
+                                    f"Originally created {workflow['created_at'][:10]} — "
+                                    f"{dup_check['similarity']:.0%} match\n\n"
+                                ) + self.compiler.run(
+                                    workflow["content"], goal,
+                                    mode=mode, role_preamble=role_preamble
+                                )
+                                result["success"] = True
+                                return result
 
-        try:
-            if on_step:
-                on_step("architect")
-            blueprint = self.architect.run(
-                clarified_goal,
-                context_nodes=context_nodes,
-                role_preamble=role_preamble,
-            )
-            if not isinstance(blueprint, dict):
-                raise ValueError("Architect returned invalid blueprint")
+                    elif dup_check["action"] == "evolve":
+                        result["knowledge_context"] = {
+                            "action":        "evolve",
+                            "existing_node": dup_check["existing_node"],
+                            "similarity":    dup_check["similarity"],
+                        }
+
+                    context_nodes = ka.get_context_for_pipeline(goal)
+                    if context_nodes:
+                        result["knowledge_used"] = True
+
+                except Exception as e:
+                    logger.warning(f"[Pipeline] Knowledge check failed (continuing): {e}")
+
+            # ─── CLARIFIER (Standard + Deep) ──────────────
+            if is_agent_active("clarifier"):
+                step("Clarifier")
+                result["agents_used"].append("Clarifier")
+
+            # ─── ARCHITECT (Standard + Deep) ──────────────
+            if not is_agent_active("architect"):
+                # ⚡ Fast tier — go straight to QA
+                step("QA (fast tier)")
+                result["agents_used"].append("QA")
+                try:
+                    answer = self.qa.run(
+                        goal, complexity=complexity,
+                        mode=mode, role_preamble=role_preamble
+                    )
+                    result["output"]  = answer
+                    result["success"] = True
+                    return result
+                except Exception as e:
+                    return _error_result(f"QA failed: {e}", mode, role_id, complexity)
+
+            step("Architect")
+            result["agents_used"].append("Architect")
+            try:
+                blueprint = self.architect.run(
+                    goal, context_nodes=context_nodes, role_preamble=role_preamble
+                )
+            except Exception as e:
+                return _error_result(f"Architect failed: {e}", mode, role_id, complexity)
+
+            # ─── CRITIC (Standard + Deep) ─────────────────
+            critique = {"status": "pass", "issues": []}
+            if is_agent_active("critic"):
+                step("Critic")
+                result["agents_used"].append("Critic")
+                try:
+                    critique = self.critic.run(
+                        blueprint, original_goal=goal, role_preamble=role_preamble
+                    )
+                except Exception as e:
+                    logger.warning(f"[Pipeline] Critic failed: {e} — skipping")
+
+            result["critic_status"] = critique.get("status", "pass")
+            result["critic_issues"] = critique.get("issues", [])
+
+            # ─── OPERATOR (Deep only) ─────────────────────
+            if (is_agent_active("operator")
+                    and critique.get("status") == "fail"
+                    and critique.get("issues")):
+                step("Operator")
+                result["agents_used"].append("Operator")
+                try:
+                    blueprint = self.operator.run(
+                        blueprint, issues=critique["issues"],
+                        original_goal=goal, role_preamble=role_preamble
+                    )
+                    result["operator_used"] = True
+                    logger.info(f"[Pipeline] Operator fixed {len(critique['issues'])} issues")
+                except Exception as e:
+                    logger.warning(f"[Pipeline] Operator failed: {e}")
+            else:
+                if not is_agent_active("operator"):
+                    step("Operator skipped (tier)")
+                else:
+                    step("Operator skipped (no issues)")
+
+            # ─── AUDITOR (Deep only) ──────────────────────
+            if is_agent_active("auditor"):
+                step("Auditor")
+                result["agents_used"].append("Auditor")
+                try:
+                    blueprint = self.auditor.run(
+                        blueprint, original_goal=goal, role_preamble=role_preamble
+                    )
+                except Exception as e:
+                    logger.warning(f"[Pipeline] Auditor failed: {e}")
+
+            # ─── VALIDATOR (Standard + Deep) ──────────────
+            validation = {"status": "pass"}
+            if is_agent_active("validator"):
+                step("Validator")
+                result["agents_used"].append("Validator")
+                try:
+                    validation = self.validator.run(blueprint, role_preamble=role_preamble)
+                except Exception as e:
+                    logger.warning(f"[Pipeline] Validator failed: {e}")
+
+            result["validation"] = validation
+            if validation.get("status") != "pass":
+                return _error_result(
+                    f"Validation failed: {validation.get('reason', 'Schema error')}",
+                    mode, role_id, complexity
+                )
+
             result["output_parsed"] = blueprint
 
-            if on_step:
-                on_step("critic")
-            critique = self.critic.run(
-                blueprint,
-                clarified_goal,
-                role_preamble=role_preamble,
-            )
-            status = critique.get("status", "pass") if isinstance(critique, dict) else "pass"
-            issues = critique.get("issues", []) if isinstance(critique, dict) else []
-            if not isinstance(issues, list):
-                issues = []
-            result["critic_status"] = status
-            result["critic_issues"] = issues
-
-            if issues:
-                if on_step:
-                    on_step("operator")
-                blueprint = self.operator.run(
-                    blueprint,
-                    issues,
-                    clarified_goal,
-                    role_preamble=role_preamble,
-                )
-                result["operator_used"] = True
-                result["output_parsed"] = blueprint
-
-            if on_step:
-                on_step("validate")
-            validation = self.validator.run(
-                blueprint,
-                role_preamble=role_preamble,
-            )
-            if not isinstance(validation, dict):
-                raise ValueError("Validator returned invalid response")
-            if validation.get("status") != "pass":
-                result["error"] = validation.get("reason", "Validation failed")
-
-            if on_step:
-                on_step("compile")
-            compiled = self.compiler.run(
-                blueprint,
-                clarified_goal,
-                mode=mode,
-                context_nodes=context_nodes,
-                role_preamble=role_preamble,
-            )
-            result["output"] = compiled
-            result["success"] = bool(compiled)
-
+            # ─── COMPILER (Standard + Deep) ───────────────
+            step("Compiler")
+            result["agents_used"].append("Compiler")
             try:
-                workflow_id = kdb.create_node(
-                    node_type="workflow",
-                    content={
-                        "goal_summary": blueprint.get("goal_summary", ""),
-                        "phases": blueprint.get("phases", []),
-                        "original_goal": goal.strip(),
-                        "clarified_goal": clarified_goal,
-                    },
+                compiled = self.compiler.run(
+                    blueprint, original_goal=goal, mode=mode,
+                    context_nodes=context_nodes, role_preamble=role_preamble
                 )
-                knowledge_agent.auto_link_node(
-                    workflow_id,
-                    {
-                        "type": "workflow",
-                        "content": {
-                            "goal_summary": blueprint.get("goal_summary", ""),
-                            "phases": blueprint.get("phases", []),
-                        },
-                    },
-                )
-            except Exception as exc:
-                logger.warning(f"[Pipeline] Workflow storage/linking failed: {exc}")
+            except Exception as e:
+                return _error_result(f"Compiler failed: {e}", mode, role_id, complexity)
 
+            if not compiled or not compiled.strip():
+                return _error_result("Compiler returned empty output", mode, role_id, complexity)
+
+            result["output"]  = compiled
+            result["success"] = True
+
+            # ─── KNOWLEDGE STORAGE (Deep only) ────────────
+            if self.knowledge_enabled and is_agent_active("knowledge_retriever"):
+                step("Storing in knowledge base")
+                try:
+                    goal_id     = kdb.create_node(
+                        node_type="goal",
+                        content={
+                            "original_input": goal,
+                            "clarified_goal": goal,
+                            "mode":           mode,
+                            "role_id":        role_id,
+                            "complexity":     complexity,
+                        }
+                    )
+                    workflow_id = kdb.create_node(
+                        node_type="workflow",
+                        content=blueprint,
+                        metadata={"mode": mode, "role_id": role_id, "complexity": complexity}
+                    )
+                    kdb.create_edge(
+                        from_node=workflow_id, to_node=goal_id,
+                        edge_type="derives_from", strength=1.0,
+                        reason="Workflow created for goal"
+                    )
+                    goal_node     = kdb.get_node(goal_id, update_access=False)
+                    workflow_node = kdb.get_node(workflow_id, update_access=False)
+                    ka.auto_link_node(goal_id, goal_node)
+                    ka.auto_link_node(workflow_id, workflow_node)
+
+                    result["goal_node_id"]     = goal_id
+                    result["workflow_node_id"] = workflow_id
+
+                    stats = kdb.get_stats()
+                    if stats["total_nodes"] > 0 and stats["total_nodes"] % 10 == 0:
+                        ka.generate_insights()
+
+                except Exception as e:
+                    logger.warning(f"[Pipeline] Knowledge storage failed (non-fatal): {e}")
+
+            step("Complete")
             return result
-        except Exception as exc:
-            logger.error(f"[Pipeline] Run failed: {exc}", exc_info=True)
-            result["error"] = str(exc)
-            return result
 
-    def run_from_document(self, text: str, role_id: str = "default", on_step=None) -> Dict:
-        role_preamble = roles.get_role_preamble(role_id)
-        if not text or not text.strip():
-            return {
-                "success": False,
-                "output": "",
-                "output_parsed": None,
-                "extracted_goal": "",
-                "mode": "default",
-                "role_id": role_id,
-                "error": "Document text is required",
-            }
-
-        try:
-            if on_step:
-                on_step("extract_document")
-            extracted_goal = self.extractor.run(text, role_preamble=role_preamble)
-            extracted_goal = extracted_goal.strip()
-            if not extracted_goal:
-                raise ValueError("Could not extract a goal from the document")
-
-            document_id = kdb.create_node(
-                node_type="document",
-                content={
-                    "source_text": text[:5000],
-                    "extracted_goal": extracted_goal,
-                },
-            )
-
-            result = self.run(
-                extracted_goal,
-                mode="default",
-                answers={},
-                role_id=role_id,
-                on_step=on_step,
-            )
-            result["extracted_goal"] = extracted_goal
-            result["document_id"] = document_id
-            return result
-        except Exception as exc:
-            logger.error(f"[Pipeline] Document pipeline failed: {exc}", exc_info=True)
-            return {
-                "success": False,
-                "output": "",
-                "output_parsed": None,
-                "extracted_goal": "",
-                "mode": "default",
-                "role_id": role_id,
-                "error": str(exc),
-            }
-
-    def run_adaptive(self, question: str, role_id: str = "default", on_step=None) -> Dict:
-        role_preamble = roles.get_role_preamble(role_id)
-        try:
-            if on_step:
-                on_step("route")
-            routing = self.router.run(question, role_preamble=role_preamble)
-        except Exception as exc:
-            logger.warning(f"[Pipeline] Router failed: {exc}")
-            routing = {}
-
-        mode = routing.get("mode", "default")
-        complexity = routing.get("complexity", "medium")
-        if mode not in ("default", "coach"):
-            mode = "default"
-        if complexity not in ("simple", "medium", "complex"):
-            complexity = "medium"
-
-        try:
-            if on_step:
-                on_step("qa")
-            output = self.qa.run(
-                question,
-                complexity=complexity,
-                mode=mode,
-                role_preamble=role_preamble,
-            )
-            return {
-                "output": output,
-                "mode": mode,
-                "role_id": role_id,
-            }
-        except Exception as exc:
-            logger.error(f"[Pipeline] Q&A failed: {exc}", exc_info=True)
-            return {
-                "output": "",
-                "mode": mode,
-                "role_id": role_id,
-                "error": str(exc),
-            }
-
-    @staticmethod
-    def _prepare_clarified_goal(goal: str, answers: Dict) -> str:
-        clarified = goal.strip()
-        if answers:
-            details = []
-            for key, value in answers.items():
-                if not value:
-                    continue
-                details.append(f"{key}: {value}")
-
-            if details:
-                clarified += "\n\nClarifying details:\n" + "\n".join(details)
-        return clarified
+        except Exception as e:
+            logger.error(f"[Pipeline] Unexpected error: {e}", exc_info=True)
+            return _error_result(f"Pipeline error: {e}", mode, role_id, complexity)
 
 
-def get_pipeline() -> Pipeline:
-    return Pipeline()
+# ═══════════════════════════════════════════════════
+# THREAD-SAFE SINGLETON
+# ═══════════════════════════════════════════════════
+
+_pipeline_instance = None
+_pipeline_lock     = threading.Lock()
+
+def get_pipeline() -> WorkflowPipeline:
+    global _pipeline_instance
+    if _pipeline_instance is None:
+        with _pipeline_lock:
+            if _pipeline_instance is None:
+                _pipeline_instance = WorkflowPipeline()
+    return _pipeline_instance
