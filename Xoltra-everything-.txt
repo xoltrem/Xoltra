@@ -1,0 +1,15 @@
+Xoltra 
+
+its a an agentic system which has many features designed in helping users save time doing repetitive tasks and focused on helping business and people who what time to do other things basically automation if you catch my drift.
+
+
+features:
+1.) n8n node building with assistance from ai- just what n8n does but all can be done with ai with no prior knowledge of n8n.
+2.) it has multiple roles which the ai can take kind of like character ai but for teacher and business related positions, which can be updated
+3.) it has a unity integration which allows the ai to manipulate source packets with real time info as a simulation for user learning and to answer with precision and accuracy
+4.) the knowledge base which summerises info done in other chats and saves the info locally
+5.) the knowledge base correlates with this feature it understands your patterns and answers like how you specifically would understand
+6.) with your permission by choosing select websites via api or other means the ai can manipulate information on that website like word, if the api is there it can be connected with the n8n extention along with the base/default
+7.) depending on the typee of questions on complexity the amount of models will be used.
+
+8. the most important feture is that it would have regular updates and a tier system - im quite unsure about how the business model would be for this product-
