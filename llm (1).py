@@ -2,6 +2,7 @@
 llm.py — XoltaOS LLM Layer
 Cohere-only for now. Multi-provider support will be added later.
 Clean JSON parsing, proper error handling, no fake fallbacks.
+Supports role_preamble — injected as Cohere system-level preamble.
 """
 
 from dotenv import load_dotenv
@@ -156,56 +157,67 @@ def safe_json_parse(raw: str) -> dict:
 
 
 # ═══════════════════════════════════════════════════
+# COHERE IMPLEMENTATION
+# ═══════════════════════════════════════════════════
+
+def _call_cohere(prompt: str, model: str, temperature: float,
+                 preamble: Optional[str] = None) -> str:
+    """
+    Internal Cohere caller.
+    preamble is injected as the system-level persona instruction.
+    Cohere's preamble param is the canonical system prompt equivalent.
+    """
+    client = _init_cohere()
+
+    kwargs = {
+        "model":       model,
+        "message":     prompt,
+        "temperature": temperature,
+        "max_tokens":  3000,
+    }
+    if preamble:
+        kwargs["preamble"] = preamble
+
+    response = client.chat(**kwargs)
+    return response.text.strip()
+
+
+# ═══════════════════════════════════════════════════
 # UNIVERSAL LLM CALLER
 # ═══════════════════════════════════════════════════
 
-def call_llm(role: str, prompt: str, retries: int = 2) -> str:
+def call_llm(role: str, prompt: str, retries: int = 2,
+             role_preamble: Optional[str] = None) -> str:
     """
-    Route prompt to Cohere and return raw response.
-    Raises RuntimeError if all retries fail — never returns fake data.
-    """
-    if role not in MODEL_ROUTING:
-        raise ValueError(f"Unknown role: {role}")
+    Universal LLM caller. role = agent role key (e.g. "architect").
+    role_preamble = optional persona string from roles.py, injected at
+    the Cohere preamble level so it conditions all agent output in a session.
 
-    config      = MODEL_ROUTING[role]
-    model_key   = config["model_key"]
-    model_info  = AVAILABLE_MODELS[model_key]
-    model_name  = model_info["model"]
-    temperature = config["temperature"]
+    JSON roles: response is cleaned via clean_json().
+    PROSE_ROLES: response returned as-is.
+    Raises RuntimeError if all retries exhausted.
+    """
+    config     = MODEL_ROUTING.get(role, MODEL_ROUTING["architect"])
+    model_key  = config["model_key"]
+    temp       = config["temperature"]
+    model_name = AVAILABLE_MODELS[model_key]["model"]
 
     last_error = None
     for attempt in range(retries + 1):
         try:
-            result = _call_cohere(model_name, prompt, temperature)
-
+            raw = _call_cohere(prompt, model_name, temp, preamble=role_preamble)
             if role not in PROSE_ROLES:
-                result = clean_json(result)
-
-            logger.debug(f"[{role.upper()}] cohere/{model_key} OK — {len(result)} chars")
-            return result
-
+                return clean_json(raw)
+            return raw
         except Exception as e:
             last_error = e
             logger.warning(f"[{role.upper()}] Attempt {attempt + 1}/{retries + 1} failed: {e}")
             if attempt < retries:
-                time.sleep(2 ** attempt)  # exponential backoff: 1s, 2s
+                time.sleep(1.5 * (attempt + 1))
 
-    raise RuntimeError(f"[{role.upper()}] All {retries + 1} attempts failed. Last error: {last_error}")
-
-
-# ═══════════════════════════════════════════════════
-# COHERE IMPLEMENTATION
-# ═══════════════════════════════════════════════════
-
-def _call_cohere(model: str, prompt: str, temperature: float) -> str:
-    client = _init_cohere()
-    response = client.chat(
-        model=model,
-        message=prompt,
-        temperature=temperature,
-        max_tokens=3000
+    raise RuntimeError(
+        f"call_llm failed for role '{role}' after {retries + 1} attempts: {last_error}"
     )
-    return response.text.strip()
 
 
 # ═══════════════════════════════════════════════════
@@ -242,21 +254,47 @@ def generate_query_embedding(text: str) -> list:
 
 
 # ═══════════════════════════════════════════════════
-# AGENT WRAPPERS — backward-compatible named calls
+# AGENT WRAPPERS — all gain role_preamble param
 # ═══════════════════════════════════════════════════
 
-def call_router(prompt):               return call_llm("router", prompt)
-def call_clarifier(prompt):            return call_llm("clarifier", prompt)
-def call_extractor(prompt):            return call_llm("extractor", prompt)
-def call_architect(prompt):            return call_llm("architect", prompt)
-def call_critic(prompt):               return call_llm("critic", prompt)
-def call_operator(prompt):             return call_llm("operator", prompt)
-def call_auditor(prompt):              return call_llm("auditor", prompt)
-def call_validator(prompt):            return call_llm("validator", prompt)
-def call_compiler(prompt):             return call_llm("compiler", prompt)
-def call_qa(prompt):                   return call_llm("qa", prompt)
-def call_knowledge_retriever(prompt):  return call_llm("knowledge_retriever", prompt)
-def call_knowledge_linker(prompt):     return call_llm("knowledge_linker", prompt)
-def call_insight_generator(prompt):    return call_llm("insight_generator", prompt)
-def call_deduplicator(prompt):         return call_llm("deduplicator", prompt)
+def call_router(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("router", prompt, role_preamble=role_preamble)
 
+def call_clarifier(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("clarifier", prompt, role_preamble=role_preamble)
+
+def call_extractor(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("extractor", prompt, role_preamble=role_preamble)
+
+def call_architect(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("architect", prompt, role_preamble=role_preamble)
+
+def call_critic(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("critic", prompt, role_preamble=role_preamble)
+
+def call_operator(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("operator", prompt, role_preamble=role_preamble)
+
+def call_auditor(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("auditor", prompt, role_preamble=role_preamble)
+
+def call_validator(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("validator", prompt, role_preamble=role_preamble)
+
+def call_compiler(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("compiler", prompt, role_preamble=role_preamble)
+
+def call_qa(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("qa", prompt, role_preamble=role_preamble)
+
+def call_knowledge_retriever(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("knowledge_retriever", prompt, role_preamble=role_preamble)
+
+def call_knowledge_linker(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("knowledge_linker", prompt, role_preamble=role_preamble)
+
+def call_insight_generator(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("insight_generator", prompt, role_preamble=role_preamble)
+
+def call_deduplicator(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("deduplicator", prompt, role_preamble=role_preamble)
