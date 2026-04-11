@@ -5,6 +5,7 @@ Every agent:
 - Receives original_goal where relevant so context is never lost
 - Parses its own JSON safely — never trusts raw LLM output
 - Raises on failure rather than returning garbage
+- Accepts role_preamble: str | None — passed to every LLM call
 
 Two modes:
   default — direct + detailed, leads with answers
@@ -28,13 +29,13 @@ logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════
-# ROUTER — classifies input, detects mode and depth
+# ROUTER
 # ═══════════════════════════════════════════════════
 
 class RouterAgent:
 
-    def run(self, user_input: str) -> dict:
-        """Returns parsed routing dict. Raises on failure."""
+    def run(self, user_input: str,
+            role_preamble: Optional[str] = None) -> dict:
         raw = call_router(f"""
 You are an intelligent request classifier for an AI execution system.
 
@@ -69,18 +70,18 @@ Return ONLY valid JSON, nothing else:
 }}
 
 Input: {user_input}
-""")
+""", role_preamble=role_preamble)
         return safe_json_parse(raw)
 
 
 # ═══════════════════════════════════════════════════
-# CLARIFIER — generates smart intake questions
+# CLARIFIER
 # ═══════════════════════════════════════════════════
 
 class ClarifierAgent:
 
-    def run(self, goal: str) -> dict:
-        """Returns parsed questions dict. Raises on failure."""
+    def run(self, goal: str,
+            role_preamble: Optional[str] = None) -> dict:
         raw = call_clarifier(f"""
 You are a strategic intake specialist generating clarifying questions before building an execution plan.
 
@@ -101,18 +102,18 @@ Return ONLY valid JSON:
 }}
 
 Goal: {goal}
-""")
+""", role_preamble=role_preamble)
         return safe_json_parse(raw)
 
 
 # ═══════════════════════════════════════════════════
-# PDF EXTRACTOR — document → goal statement
+# PDF EXTRACTOR
 # ═══════════════════════════════════════════════════
 
 class PDFExtractorAgent:
 
-    def run(self, raw_text: str) -> str:
-        """Returns goal string directly (prose, not JSON)."""
+    def run(self, raw_text: str,
+            role_preamble: Optional[str] = None) -> str:
         return call_extractor(f"""
 You are a precision document analyst.
 Convert raw document text into an actionable goal statement — 3-6 sentences.
@@ -122,11 +123,11 @@ Do NOT summarize — frame as an actionable goal.
 Output ONLY the goal statement, no preamble.
 
 Raw Text: {raw_text[:6000]}
-""")
+""", role_preamble=role_preamble)
 
 
 # ═══════════════════════════════════════════════════
-# ARCHITECT — builds execution blueprint
+# ARCHITECT
 # ═══════════════════════════════════════════════════
 
 class ArchitectAgent:
@@ -134,17 +135,17 @@ class ArchitectAgent:
     def run(
         self,
         goal: str,
-        context_nodes: Optional[List[Dict]] = None
+        context_nodes: Optional[List[Dict]] = None,
+        role_preamble: Optional[str] = None
     ) -> dict:
-        """Returns parsed blueprint dict. Raises on failure."""
 
         context_section = ""
         if context_nodes:
             context_section = "\n\n## RELEVANT PAST WORK\n"
             for i, node in enumerate(context_nodes[:3], 1):
-                summary = node.get("content", "")[:200]
+                summary   = node.get("content", "")[:200]
                 relevance = node.get("relevance", 0)
-                created = node.get("created_at", "")[:10]
+                created   = node.get("created_at", "")[:10]
                 context_section += (
                     f"{i}. [{node['type'].upper()}] {summary}... "
                     f"(relevance: {relevance:.0%}, created: {created})\n"
@@ -187,18 +188,18 @@ Rules:
 - No text outside JSON
 {context_section}
 Goal: {goal}
-""")
+""", role_preamble=role_preamble)
         return safe_json_parse(raw)
 
 
 # ═══════════════════════════════════════════════════
-# CRITIC — finds flaws ruthlessly
+# CRITIC
 # ═══════════════════════════════════════════════════
 
 class CriticAgent:
 
-    def run(self, blueprint: dict, original_goal: str) -> dict:
-        """Returns parsed critique dict. Raises on failure."""
+    def run(self, blueprint: dict, original_goal: str,
+            role_preamble: Optional[str] = None) -> dict:
         raw = call_critic(f"""
 Ruthless plan reviewer. Your job is to find every flaw.
 
@@ -220,12 +221,12 @@ Return ONLY JSON:
 If clean: {{"status": "pass", "issues": []}}
 
 Draft Plan: {json.dumps(blueprint)}
-""")
+""", role_preamble=role_preamble)
         return safe_json_parse(raw)
 
 
 # ═══════════════════════════════════════════════════
-# OPERATOR — fixes critic issues
+# OPERATOR
 # ═══════════════════════════════════════════════════
 
 class OperatorAgent:
@@ -234,9 +235,9 @@ class OperatorAgent:
         self,
         blueprint: dict,
         issues: List[str],
-        original_goal: str
+        original_goal: str,
+        role_preamble: Optional[str] = None
     ) -> dict:
-        """Returns fixed blueprint dict. Raises on failure."""
         raw = call_operator(f"""
 Pragmatic fixer. Fix every issue listed precisely.
 
@@ -251,18 +252,18 @@ Rules:
 Original Goal: {original_goal}
 Issues to Fix: {json.dumps(issues)}
 Draft Plan: {json.dumps(blueprint)}
-""")
+""", role_preamble=role_preamble)
         return safe_json_parse(raw)
 
 
 # ═══════════════════════════════════════════════════
-# AUDITOR — sharpens quality
+# AUDITOR
 # ═══════════════════════════════════════════════════
 
 class AuditorAgent:
 
-    def run(self, blueprint: dict, original_goal: str) -> dict:
-        """Returns sharpened blueprint dict. Raises on failure."""
+    def run(self, blueprint: dict, original_goal: str,
+            role_preamble: Optional[str] = None) -> dict:
         raw = call_auditor(f"""
 Precision auditor. Sharpen without changing structure.
 
@@ -281,18 +282,18 @@ Original Goal: {original_goal}
 Return improved JSON only.
 
 Plan: {json.dumps(blueprint)}
-""")
+""", role_preamble=role_preamble)
         return safe_json_parse(raw)
 
 
 # ═══════════════════════════════════════════════════
-# VALIDATOR — schema compliance check
+# VALIDATOR
 # ═══════════════════════════════════════════════════
 
 class ValidatorAgent:
 
-    def run(self, blueprint: dict) -> dict:
-        """Returns validation result dict. Raises on failure."""
+    def run(self, blueprint: dict,
+            role_preamble: Optional[str] = None) -> dict:
         raw = call_validator(f"""
 Strict JSON schema validator. Binary — pass or fail only.
 
@@ -311,12 +312,12 @@ OR
 {{"status": "fail", "reason": "exact field and issue"}}
 
 JSON to validate: {json.dumps(blueprint)}
-""")
+""", role_preamble=role_preamble)
         return safe_json_parse(raw)
 
 
 # ═══════════════════════════════════════════════════
-# COMPILER — final human-readable output
+# COMPILER
 # ═══════════════════════════════════════════════════
 
 class CompilerAgent:
@@ -326,9 +327,9 @@ class CompilerAgent:
         blueprint: dict,
         original_goal: str,
         mode: str = "default",
-        context_nodes: Optional[List[Dict]] = None
+        context_nodes: Optional[List[Dict]] = None,
+        role_preamble: Optional[str] = None
     ) -> str:
-        """Returns compiled markdown string (prose, not JSON)."""
 
         if mode == "coach":
             style = """
@@ -378,13 +379,12 @@ Each risk as a paragraph: what it is, why it happens, exact mitigation.
 500-800 words. Paragraphs only. No bullets. Second person. No filler.
 """
 
-        # Build optional context footer
         context_footer = ""
         if context_nodes:
             context_footer = "\n\n---\n\n## RELATED PAST WORK\n\n"
             for node in context_nodes[:2]:
-                summary = node.get("content", "")[:150]
-                created = node.get("created_at", "")[:10]
+                summary   = node.get("content", "")[:150]
+                created   = node.get("created_at", "")[:10]
                 relevance = node.get("relevance", 0)
                 context_footer += (
                     f"**{node['type'].title()}** (created {created}, "
@@ -404,13 +404,13 @@ Additional rules:
 
 Original Goal: {original_goal}
 Execution Plan: {json.dumps(blueprint)}
-""")
+""", role_preamble=role_preamble)
 
         return compiled + context_footer
 
 
 # ═══════════════════════════════════════════════════
-# QA AGENT — handles Q&A tab in both modes
+# QA AGENT
 # ═══════════════════════════════════════════════════
 
 class QAAgent:
@@ -418,10 +418,10 @@ class QAAgent:
     def run(
         self,
         question: str,
-        complexity: str,
-        mode: str = "default"
+        complexity: str = "medium",
+        mode: str = "default",
+        role_preamble: Optional[str] = None
     ) -> str:
-        """Returns answer string (prose)."""
 
         length = {
             "simple":  "2-4 sentences",
@@ -440,7 +440,7 @@ You are a world-class coach. Help the user understand — never just give the an
 - Second person. Length: {length}
 
 Question: {question}
-""")
+""", role_preamble=role_preamble)
         else:
             return call_qa(f"""
 You are a direct, expert responder. Two qualities combined: direct AND detailed.
@@ -454,7 +454,7 @@ You are a direct, expert responder. Two qualities combined: direct AND detailed.
 - Length: {length}. Second person where natural.
 
 Question: {question}
-""")
+""", role_preamble=role_preamble)
 
 
 # ═══════════════════════════════════════════════════
@@ -462,9 +462,9 @@ Question: {question}
 # ═══════════════════════════════════════════════════
 
 class KnowledgeLinkerAgent:
-    """Determines relationships between nodes using LLM."""
 
-    def run(self, source_node: dict, candidate_nodes: list) -> dict:
+    def run(self, source_node: dict, candidate_nodes: list,
+            role_preamble: Optional[str] = None) -> dict:
         raw = call_knowledge_linker(f"""
 You are a knowledge graph relationship expert.
 
@@ -495,14 +495,14 @@ Return ONLY JSON:
     }}
   ]
 }}
-""")
+""", role_preamble=role_preamble)
         return safe_json_parse(raw)
 
 
 class DeduplicatorAgent:
-    """Checks for duplicate or similar goals using LLM."""
 
-    def run(self, goal: str, similar_goals: list) -> dict:
+    def run(self, goal: str, similar_goals: list,
+            role_preamble: Optional[str] = None) -> dict:
         raw = call_deduplicator(f"""
 You are a duplication detection specialist.
 
@@ -525,5 +525,5 @@ Return ONLY JSON:
   "confidence": 0.0-1.0,
   "reasoning": "one sentence"
 }}
-""")
+""", role_preamble=role_preamble)
         return safe_json_parse(raw)
