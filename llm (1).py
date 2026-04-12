@@ -3,6 +3,11 @@ llm.py — XoltaOS LLM Layer
 Cohere-only for now. Multi-provider support will be added later.
 Clean JSON parsing, proper error handling, no fake fallbacks.
 Supports role_preamble — injected as Cohere system-level preamble.
+
+Tier system (auto-selected by Router):
+  ⚡ Fast     (simple)  — Router → QA
+  ⚖ Standard (medium)  — Router → Clarifier → Architect → Critic → Validator → Compiler
+  🧠 Deep     (complex) — All 14 agents, best models
 """
 
 from dotenv import load_dotenv
@@ -11,7 +16,7 @@ import re
 import time
 import json
 import logging
-from typing import Optional, Dict
+from typing import Optional, Dict, Set
 
 load_dotenv(override=True)
 
@@ -37,59 +42,184 @@ def _init_cohere():
 
 
 # ═══════════════════════════════════════════════════
-# MODEL REGISTRY — Cohere only
+# MODEL REGISTRY
 # ═══════════════════════════════════════════════════
 
 AVAILABLE_MODELS = {
     "cohere-r7b": {
         "provider": "cohere",
-        "model": "command-r7b-12-2024",
-        "speed": "fast",
-        "cost": "low"
+        "model":    "command-r7b-12-2024",
+        "speed":    "fast",
+        "cost":     "low",
+        "tier":     1,
     },
     "cohere-r": {
         "provider": "cohere",
-        "model": "command-r-08-2024",
-        "speed": "medium",
-        "cost": "medium"
-    },
-    "cohere-r-plus": {
-        "provider": "cohere",
-        "model": "command-r-plus-08-2024",
-        "speed": "slow",
-        "cost": "high"
+        "model":    "command-r-08-2024",
+        "speed":    "medium",
+        "cost":     "medium",
+        "tier":     2,
     },
     "cohere-a": {
         "provider": "cohere",
-        "model": "command-a-03-2025",
-        "speed": "medium",
-        "cost": "medium"
+        "model":    "command-a-03-2025",
+        "speed":    "medium",
+        "cost":     "medium",
+        "tier":     3,
+    },
+    "cohere-r-plus": {
+        "provider": "cohere",
+        "model":    "command-r-plus-08-2024",
+        "speed":    "slow",
+        "cost":     "high",
+        "tier":     4,
     },
 }
 
-# Single source of truth for defaults
-_DEFAULT_ROUTING = {
-    "router":              {"model_key": "cohere-r7b", "temperature": 0.0},
-    "clarifier":           {"model_key": "cohere-r7b", "temperature": 0.1},
-    "extractor":           {"model_key": "cohere-a",   "temperature": 0.2},
-    "architect":           {"model_key": "cohere-a",   "temperature": 0.3},
-    "critic":              {"model_key": "cohere-r7b", "temperature": 0.1},
-    "operator":            {"model_key": "cohere-a",   "temperature": 0.4},
-    "auditor":             {"model_key": "cohere-r7b", "temperature": 0.2},
-    "validator":           {"model_key": "cohere-r7b", "temperature": 0.0},
-    "compiler":            {"model_key": "cohere-a",   "temperature": 0.4},
-    "qa":                  {"model_key": "cohere-a",   "temperature": 0.4},
-    "knowledge_retriever": {"model_key": "cohere-r7b", "temperature": 0.0},
-    "knowledge_linker":    {"model_key": "cohere-a",   "temperature": 0.2},
-    "insight_generator":   {"model_key": "cohere-a",   "temperature": 0.3},
-    "deduplicator":        {"model_key": "cohere-r7b", "temperature": 0.0},
+
+# ═══════════════════════════════════════════════════
+# TIER DEFINITIONS
+#
+# Analogy: think of this like Gemini's Fast vs Thinking.
+# ⚡ Fast     = quick answer, minimal agents, cheapest model
+# ⚖ Standard = balanced, core agents, mid-tier models
+# 🧠 Deep     = full power, all 14 agents, best models
+# ═══════════════════════════════════════════════════
+
+TIERS = {
+    "simple": {
+        "label":        "⚡ Fast",
+        "agents":       {"router", "qa"},
+        "light_model":  "cohere-r7b",
+        "heavy_model":  "cohere-r7b",
+    },
+    "medium": {
+        "label":        "⚖ Standard",
+        "agents":       {
+            "router", "clarifier", "architect",
+            "critic", "validator", "compiler"
+        },
+        "light_model":  "cohere-r7b",
+        "heavy_model":  "cohere-a",
+    },
+    "complex": {
+        "label":        "🧠 Deep",
+        "agents":       {
+            "router", "clarifier", "extractor",
+            "architect", "critic", "operator",
+            "auditor", "validator", "compiler", "qa",
+            "knowledge_retriever", "knowledge_linker",
+            "insight_generator", "deduplicator"
+        },
+        "light_model":  "cohere-r",
+        "heavy_model":  "cohere-r-plus",
+    },
 }
 
-# Live routing — mutated by set_model_for_role
-MODEL_ROUTING = {k: dict(v) for k, v in _DEFAULT_ROUTING.items()}
+# Light agents = fast decisions (routing, validation, deduplication)
+# Heavy agents = deep generation (architecture, compilation, insight)
+_LIGHT_AGENTS = {
+    "router", "clarifier", "critic", "auditor",
+    "validator", "deduplicator", "knowledge_retriever"
+}
+_HEAVY_AGENTS = {
+    "architect", "operator", "compiler", "extractor",
+    "qa", "knowledge_linker", "insight_generator"
+}
 
-# These agents return prose, not JSON — skip JSON cleaning
+# Current active tier — set by apply_tier()
+_active_tier: str = "medium"
+
+
+# ═══════════════════════════════════════════════════
+# DEFAULT ROUTING (medium tier baseline)
+# ═══════════════════════════════════════════════════
+
+_AGENT_TEMPERATURES = {
+    "router":              0.0,
+    "clarifier":           0.1,
+    "extractor":           0.2,
+    "architect":           0.3,
+    "critic":              0.1,
+    "operator":            0.4,
+    "auditor":             0.2,
+    "validator":           0.0,
+    "compiler":            0.4,
+    "qa":                  0.4,
+    "knowledge_retriever": 0.0,
+    "knowledge_linker":    0.2,
+    "insight_generator":   0.3,
+    "deduplicator":        0.0,
+}
+
+_DEFAULT_ROUTING: Dict[str, Dict] = {
+    role: {
+        "model_key":   (
+            TIERS["medium"]["light_model"]
+            if role in _LIGHT_AGENTS
+            else TIERS["medium"]["heavy_model"]
+        ),
+        "temperature": temp,
+    }
+    for role, temp in _AGENT_TEMPERATURES.items()
+}
+
+MODEL_ROUTING: Dict[str, Dict] = {k: dict(v) for k, v in _DEFAULT_ROUTING.items()}
+
 PROSE_ROLES = {"compiler", "extractor", "qa", "knowledge_linker", "insight_generator"}
+
+
+# ═══════════════════════════════════════════════════
+# TIER API — called by pipeline after Router runs
+# ═══════════════════════════════════════════════════
+
+def apply_tier(complexity: str):
+    """
+    Called by the pipeline immediately after Router classifies input.
+    Updates MODEL_ROUTING so every agent uses the right model for this tier.
+    complexity: "simple" | "medium" | "complex"
+    """
+    global _active_tier
+
+    if complexity not in TIERS:
+        logger.warning(f"[LLM] Unknown complexity '{complexity}' — defaulting to medium")
+        complexity = "medium"
+
+    _active_tier = complexity
+    tier = TIERS[complexity]
+
+    for role in MODEL_ROUTING:
+        model_key = tier["light_model"] if role in _LIGHT_AGENTS else tier["heavy_model"]
+        MODEL_ROUTING[role]["model_key"] = model_key
+
+    logger.info(
+        f"[LLM] Tier applied: {tier['label']} | "
+        f"Agents: {len(tier['agents'])} | "
+        f"Models: light={tier['light_model']}, heavy={tier['heavy_model']}"
+    )
+
+
+def get_active_tier() -> dict:
+    """Returns the current tier info — useful for frontend display."""
+    tier = TIERS.get(_active_tier, TIERS["medium"])
+    return {
+        "complexity":   _active_tier,
+        "label":        tier["label"],
+        "agent_count":  len(tier["agents"]),
+        "agents":       sorted(tier["agents"]),
+        "light_model":  tier["light_model"],
+        "heavy_model":  tier["heavy_model"],
+    }
+
+
+def get_active_agents() -> Set[str]:
+    """Returns the set of agents that should run for the current tier."""
+    return TIERS.get(_active_tier, TIERS["medium"])["agents"]
+
+
+def is_agent_active(agent_name: str) -> bool:
+    """Check if a specific agent should run in the current tier."""
+    return agent_name in get_active_agents()
 
 
 # ═══════════════════════════════════════════════════
@@ -104,7 +234,8 @@ def set_model_for_role(role: str, model_key: str, temperature: Optional[float] =
     MODEL_ROUTING[role]["model_key"] = model_key
     if temperature is not None:
         MODEL_ROUTING[role]["temperature"] = temperature
-    logger.info(f"[LLM Config] {role} → {model_key} (temp: {MODEL_ROUTING[role]['temperature']})")
+    logger.info(f"[LLM Config] {role} → {model_key}")
+
 
 def get_all_model_configs() -> Dict:
     return {
@@ -114,14 +245,18 @@ def get_all_model_configs() -> Dict:
             "model_name": AVAILABLE_MODELS[config["model_key"]]["model"],
             "speed":      AVAILABLE_MODELS[config["model_key"]]["speed"],
             "cost":       AVAILABLE_MODELS[config["model_key"]]["cost"],
+            "tier":       AVAILABLE_MODELS[config["model_key"]]["tier"],
+            "active":     is_agent_active(role),
         }
         for role, config in MODEL_ROUTING.items()
     }
 
+
 def reset_model_config():
-    global MODEL_ROUTING
-    MODEL_ROUTING = {k: dict(v) for k, v in _DEFAULT_ROUTING.items()}
-    logger.info("[LLM Config] Reset to defaults")
+    global MODEL_ROUTING, _active_tier
+    MODEL_ROUTING  = {k: dict(v) for k, v in _DEFAULT_ROUTING.items()}
+    _active_tier   = "medium"
+    logger.info("[LLM Config] Reset to defaults (medium tier)")
 
 
 # ═══════════════════════════════════════════════════
@@ -129,10 +264,6 @@ def reset_model_config():
 # ═══════════════════════════════════════════════════
 
 def clean_json(text: str) -> str:
-    """
-    Strip everything that isn't the JSON object/array.
-    Handles: markdown fences, preamble text, trailing commentary.
-    """
     text = text.strip()
     text = re.sub(r"```(?:json)?\s*", "", text, flags=re.IGNORECASE).strip()
     text = re.sub(r"```", "", text).strip()
@@ -143,10 +274,6 @@ def clean_json(text: str) -> str:
 
 
 def safe_json_parse(raw: str) -> dict:
-    """
-    Parse JSON with helpful error. Never returns a fake fallback.
-    Raises ValueError if parsing fails so the caller can handle it.
-    """
     cleaned = clean_json(raw)
     try:
         return json.loads(cleaned)
@@ -162,13 +289,7 @@ def safe_json_parse(raw: str) -> dict:
 
 def _call_cohere(prompt: str, model: str, temperature: float,
                  preamble: Optional[str] = None) -> str:
-    """
-    Internal Cohere caller.
-    preamble is injected as the system-level persona instruction.
-    Cohere's preamble param is the canonical system prompt equivalent.
-    """
     client = _init_cohere()
-
     kwargs = {
         "model":       model,
         "message":     prompt,
@@ -177,7 +298,6 @@ def _call_cohere(prompt: str, model: str, temperature: float,
     }
     if preamble:
         kwargs["preamble"] = preamble
-
     response = client.chat(**kwargs)
     return response.text.strip()
 
@@ -188,15 +308,6 @@ def _call_cohere(prompt: str, model: str, temperature: float,
 
 def call_llm(role: str, prompt: str, retries: int = 2,
              role_preamble: Optional[str] = None) -> str:
-    """
-    Universal LLM caller. role = agent role key (e.g. "architect").
-    role_preamble = optional persona string from roles.py, injected at
-    the Cohere preamble level so it conditions all agent output in a session.
-
-    JSON roles: response is cleaned via clean_json().
-    PROSE_ROLES: response returned as-is.
-    Raises RuntimeError if all retries exhausted.
-    """
     config     = MODEL_ROUTING.get(role, MODEL_ROUTING["architect"])
     model_key  = config["model_key"]
     temp       = config["temperature"]
@@ -221,31 +332,26 @@ def call_llm(role: str, prompt: str, retries: int = 2,
 
 
 # ═══════════════════════════════════════════════════
-# EMBEDDINGS — Cohere only
+# EMBEDDINGS
 # ═══════════════════════════════════════════════════
 
 def generate_embedding(text: str) -> list:
-    """Generate document embedding. Returns [] on failure."""
     try:
-        client = _init_cohere()
+        client   = _init_cohere()
         response = client.embed(
-            texts=[text],
-            model="embed-english-v3.0",
-            input_type="search_document"
+            texts=[text], model="embed-english-v3.0", input_type="search_document"
         )
         return response.embeddings[0]
     except Exception as e:
         logger.warning(f"[EMBEDDING] Failed: {e}")
         return []
 
+
 def generate_query_embedding(text: str) -> list:
-    """Generate query embedding. Returns [] on failure."""
     try:
-        client = _init_cohere()
+        client   = _init_cohere()
         response = client.embed(
-            texts=[text],
-            model="embed-english-v3.0",
-            input_type="search_query"
+            texts=[text], model="embed-english-v3.0", input_type="search_query"
         )
         return response.embeddings[0]
     except Exception as e:
@@ -254,7 +360,7 @@ def generate_query_embedding(text: str) -> list:
 
 
 # ═══════════════════════════════════════════════════
-# AGENT WRAPPERS — all gain role_preamble param
+# AGENT WRAPPERS — 14 agents
 # ═══════════════════════════════════════════════════
 
 def call_router(prompt: str, role_preamble: Optional[str] = None) -> str:
