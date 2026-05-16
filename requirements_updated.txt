@@ -1,0 +1,7 @@
+flask
+flask-cors
+cohere
+chromadb
+pypdf
+python-dotenv
+websockets>=12.0
