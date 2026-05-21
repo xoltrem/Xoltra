@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Portal</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet"/>
+<style>
+:root{
+  --bg:#08080f;--bg2:#10101a;--bg3:#16162a;
+  --border:#20203a;--border2:#30304a;
+  --text:#e8e8f4;--text2:#8888aa;--text3:#44446a;
+  --accent:#7c5cfc;--accent2:#a07cfc;
+  --green:#2de87a;--red:#fc3c6a;--yellow:#fcbe3c;--cyan:#3cf0fc;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:var(--bg);color:var(--text);font-family:'Syne',sans-serif;min-height:100vh;}
+body::before{content:'';position:fixed;inset:0;z-index:0;
+  background-image:linear-gradient(rgba(124,92,252,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(124,92,252,.025) 1px,transparent 1px);
+  background-size:44px 44px;pointer-events:none;}
+body::after{content:'';position:fixed;inset:0;z-index:0;
+  background:radial-gradient(ellipse 70% 50% at 50% -5%,rgba(124,92,252,.09),transparent 65%);pointer-events:none;}
+#app{position:relative;z-index:1;display:flex;flex-direction:column;height:100vh;}
+
+/* Header */
+header{display:flex;align-items:center;justify-content:space-between;
+  padding:16px 28px;border-bottom:1px solid var(--border);
+  background:rgba(8,8,15,.9);backdrop-filter:blur(14px);flex-shrink:0;}
+.logo{display:flex;align-items:center;gap:10px;}
+.logo-icon{width:30px;height:30px;background:linear-gradient(135deg,var(--accent),var(--accent2));
+  border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:15px;
+  box-shadow:0 0 20px rgba(124,92,252,.4);}
+.logo-text{font-size:18px;font-weight:800;background:linear-gradient(135deg,#fff,var(--accent2));
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+.btn-settings{width:34px;height:34px;background:var(--bg2);border:1px solid var(--border);
+  border-radius:8px;display:flex;align-items:center;justify-content:center;
+  cursor:pointer;color:var(--text2);font-size:15px;transition:all .2s;}
+.btn-settings:hover{border-color:var(--accent);color:var(--accent);}
+
+/* Layout */
+main{display:grid;grid-template-columns:1fr 340px;flex:1;height:calc(100vh - 63px);}
+
+/* Left */
+.left{padding:36px 40px;display:flex;flex-direction:column;gap:28px;overflow-y:auto;border-right:1px solid var(--border);}
+.left::-webkit-scrollbar{width:4px;}
+.left::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px;}
+
+/* ── AUTO BUTTON SECTION ──────────────────────────────────────────────────────
+   The main feature. One big button to activate auto-monitoring.
+   When ON → opens claude.ai in a Puppeteer window and watches for the
+   usage limit message. When detected → opens duck.ai in a new incognito window.
+   File: src/monitor.js (watching logic)
+   API:  POST /api/auto/start  |  POST /api/auto/stop
+───────────────────────────────────────────────────────────────────────────── */
+.auto-section{display:flex;flex-direction:column;align-items:center;gap:16px;}
+
+.auto-btn{
+  width:100%;max-width:440px;height:88px;border:none;border-radius:16px;
+  font-family:'Syne',sans-serif;font-size:20px;font-weight:800;
+  color:#fff;cursor:pointer;letter-spacing:.3px;
+  transition:all .25s cubic-bezier(.4,0,.2,1);
+  display:flex;align-items:center;justify-content:center;gap:14px;
+  position:relative;overflow:hidden;
+}
+.auto-btn::before{content:'';position:absolute;inset:0;
+  background:linear-gradient(180deg,rgba(255,255,255,.13),transparent);pointer-events:none;}
+.auto-btn-inner{position:relative;z-index:1;display:flex;align-items:center;gap:14px;}
+
+/* OFF state */
+.auto-btn.off{
+  background:linear-gradient(135deg,var(--accent),#5a3ccc);
+  box-shadow:0 4px 28px rgba(124,92,252,.45),inset 0 1px 0 rgba(255,255,255,.15);
+}
+.auto-btn.off:hover{transform:translateY(-2px);box-shadow:0 8px 38px rgba(124,92,252,.6),inset 0 1px 0 rgba(255,255,255,.15);}
+
+/* ON / watching state */
+.auto-btn.on{
+  background:linear-gradient(135deg,#16a34a,#15803d);
+  box-shadow:0 4px 28px rgba(22,163,74,.5),inset 0 1px 0 rgba(255,255,255,.15);
+  animation:activeGlow 2s infinite;
+}
+@keyframes activeGlow{
+  0%,100%{box-shadow:0 4px 28px rgba(22,163,74,.5),inset 0 1px 0 rgba(255,255,255,.15);}
+  50%{box-shadow:0 4px 40px rgba(22,163,74,.8),inset 0 1px 0 rgba(255,255,255,.15);}
+}
+.auto-btn.on:hover{transform:translateY(-2px);}
+
+/* TRIGGERED state */
+.auto-btn.triggered{
+  background:linear-gradient(135deg,#dc2626,#b91c1c);
+  box-shadow:0 4px 28px rgba(220,38,38,.5),inset 0 1px 0 rgba(255,255,255,.15);
+}
+
+.auto-icon{font-size:28px;}
+.auto-label{display:flex;flex-direction:column;align-items:flex-start;gap:2px;}
+.auto-label-main{font-size:20px;font-weight:800;}
+.auto-label-sub{font-size:11px;font-weight:600;opacity:.75;letter-spacing:.5px;}
+
+/* Pulse dot when active */
+.pulse-dot{width:10px;height:10px;border-radius:50%;background:#4ade80;
+  box-shadow:0 0 8px #4ade80;animation:pulseDot 1.2s infinite;flex-shrink:0;}
+@keyframes pulseDot{0%,100%{opacity:1;transform:scale(1);}50%{opacity:.3;transform:scale(.6);}}
+
+.auto-status{
+  font-family:'Space Mono',monospace;font-size:11px;color:var(--text3);
+  text-align:center;letter-spacing:.5px;min-height:16px;transition:color .3s;
+}
+.auto-status.watching{color:var(--green);}
+.auto-status.triggered{color:var(--yellow);}
+
+/* Manual duck.ai button */
+.duck-btn{
+  width:100%;max-width:440px;height:52px;
+  background:var(--bg2);border:1px solid var(--border2);border-radius:12px;
+  font-family:'Syne',sans-serif;font-size:14px;font-weight:700;
+  color:var(--text2);cursor:pointer;transition:all .2s;
+  display:flex;align-items:center;justify-content:center;gap:10px;
+}
+.duck-btn:hover{border-color:var(--accent);color:var(--text);background:rgba(124,92,252,.08);}
+
+/* Divider */
+.divider{display:flex;align-items:center;gap:14px;width:100%;max-width:440px;margin:0 auto;}
+.divider-line{flex:1;height:1px;background:var(--border);}
+.divider-text{font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--text3);}
+
+/* Summarizer */
+.sum-section{display:flex;flex-direction:column;gap:12px;width:100%;max-width:440px;align-self:center;}
+.section-label{font-size:10px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:var(--text3);}
+.paste-area{background:var(--bg2);border:1px solid var(--border);border-radius:12px;
+  padding:14px;color:var(--text);font-family:'Syne',sans-serif;font-size:13px;
+  line-height:1.6;resize:vertical;min-height:140px;width:100%;outline:none;transition:border-color .2s;}
+.paste-area:focus{border-color:var(--accent);}
+.paste-area::placeholder{color:var(--text3);}
+.char-count{font-family:'Space Mono',monospace;font-size:10px;color:var(--text3);text-align:right;margin-top:-6px;}
+.btn-sum{width:100%;height:48px;background:linear-gradient(135deg,var(--accent),var(--accent2));
+  border:none;border-radius:10px;font-family:'Syne',sans-serif;font-size:14px;font-weight:700;
+  color:#fff;cursor:pointer;transition:all .2s;box-shadow:0 4px 18px rgba(124,92,252,.4);}
+.btn-sum:hover:not(:disabled){filter:brightness(1.1);}
+.btn-sum:disabled{opacity:.35;cursor:not-allowed;}
+
+/* Log box */
+.log-box{width:100%;max-width:440px;background:var(--bg2);border:1px solid var(--border);
+  border-radius:10px;padding:12px 14px;height:90px;overflow-y:auto;
+  font-family:'Space Mono',monospace;font-size:10px;line-height:1.7;
+  display:flex;flex-direction:column-reverse;}
+.log-box::-webkit-scrollbar{width:3px;}
+.log-box::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px;}
+.log-line{color:var(--text2);}
+.log-line .ts{color:var(--text3);margin-right:6px;}
+.log-line.warn{color:var(--yellow);}
+.log-line.triggered{color:var(--green);font-weight:700;}
+
+/* Right */
+.right{display:flex;flex-direction:column;background:var(--bg2);}
+.right-header{padding:18px 20px 14px;border-bottom:1px solid var(--border);
+  display:flex;align-items:center;justify-content:space-between;flex-shrink:0;}
+.right-title{font-size:10px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:var(--text3);}
+.summaries{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px;}
+.summaries::-webkit-scrollbar{width:4px;}
+.summaries::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px;}
+.card{background:var(--bg3);border:1px solid var(--border);border-radius:11px;
+  padding:14px;cursor:pointer;transition:all .2s;animation:cardIn .3s ease;}
+.card:hover{border-color:var(--accent);background:rgba(124,92,252,.05);}
+@keyframes cardIn{from{opacity:0;transform:translateY(-6px);}to{opacity:1;transform:translateY(0);}}
+.card-title{font-size:13px;font-weight:700;margin-bottom:5px;}
+.card-preview{font-size:11px;color:var(--text2);line-height:1.5;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+.card-meta{display:flex;align-items:center;justify-content:space-between;margin-top:9px;}
+.card-time{font-family:'Space Mono',monospace;font-size:9px;color:var(--text3);}
+.card-actions{display:flex;gap:5px;opacity:0;transition:opacity .15s;}
+.card:hover .card-actions{opacity:1;}
+.empty{display:flex;flex-direction:column;align-items:center;justify-content:center;
+  height:180px;color:var(--text3);text-align:center;gap:8px;}
+.empty .icon{font-size:28px;opacity:.2;}
+.empty p{font-size:11px;}
+.btn-sm{padding:3px 9px;border-radius:5px;font-family:'Space Mono',monospace;font-size:9px;
+  border:1px solid var(--border2);background:var(--bg2);color:var(--text2);cursor:pointer;transition:all .15s;}
+.btn-sm:hover{border-color:var(--accent);color:var(--accent);}
+.btn-sm.del:hover{border-color:var(--red);color:var(--red);}
+
+/* Overlays */
+.overlay{position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.75);
+  backdrop-filter:blur(12px);display:none;align-items:center;justify-content:center;padding:20px;}
+.overlay.open{display:flex;}
+.panel{width:640px;max-height:86vh;background:var(--bg);border:1px solid var(--border2);
+  border-radius:20px;display:flex;flex-direction:column;overflow:hidden;
+  box-shadow:0 32px 80px rgba(0,0,0,.7);animation:up .3s ease;}
+@keyframes up{from{transform:translateY(16px);opacity:0;}to{transform:translateY(0);opacity:1;}}
+.panel.sm{width:420px;}
+.panel-header{padding:20px 24px;border-bottom:1px solid var(--border);
+  display:flex;align-items:flex-start;justify-content:space-between;flex-shrink:0;}
+.panel-title{font-size:16px;font-weight:700;}
+.btn-close{background:none;border:none;color:var(--text2);cursor:pointer;font-size:18px;}
+.btn-close:hover{color:var(--text);}
+.panel-body{flex:1;overflow-y:auto;padding:22px 24px;display:flex;flex-direction:column;gap:16px;}
+.detail-label{font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--text3);margin-bottom:7px;}
+.detail-text{font-size:13px;line-height:1.7;color:var(--text2);background:var(--bg2);
+  border:1px solid var(--border);border-radius:9px;padding:14px;}
+.kp-list{display:flex;flex-direction:column;gap:6px;}
+.kp{display:flex;gap:9px;font-size:12px;color:var(--text2);line-height:1.5;}
+.kp::before{content:'▸';color:var(--accent);flex-shrink:0;margin-top:2px;}
+.code-block{background:var(--bg3);border:1px solid var(--border);border-radius:8px;
+  padding:12px;font-family:'Space Mono',monospace;font-size:10px;color:var(--cyan);
+  white-space:pre-wrap;overflow-x:auto;line-height:1.6;}
+.panel-footer{padding:14px 24px;border-top:1px solid var(--border);display:flex;gap:8px;flex-shrink:0;}
+.btn-copy{padding:9px 16px;border-radius:8px;font-family:'Syne',sans-serif;font-weight:700;font-size:12px;
+  cursor:pointer;border:1px solid var(--border2);background:var(--bg2);color:var(--text2);transition:all .2s;}
+.btn-copy:hover{border-color:var(--accent);color:var(--accent);}
+.btn-dl{padding:9px 16px;border-radius:8px;font-family:'Syne',sans-serif;font-weight:700;font-size:12px;
+  cursor:pointer;border:none;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;}
+.btn-dl:hover{filter:brightness(1.1);}
+.form-row{display:flex;flex-direction:column;gap:5px;}
+.form-label{font-size:12px;font-weight:700;color:var(--text2);}
+.form-input{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
+  padding:9px 13px;color:var(--text);font-family:'Syne',sans-serif;font-size:13px;
+  outline:none;transition:border-color .2s;width:100%;}
+.form-input:focus{border-color:var(--accent);}
+.btn-full{width:100%;padding:10px;border-radius:8px;font-family:'Syne',sans-serif;
+  font-weight:700;font-size:13px;cursor:pointer;border:none;}
+.btn-primary{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;}
+.btn-primary:hover{filter:brightness(1.1);}
+.btn-ghost{background:var(--bg2);border:1px solid var(--border2)!important;border:none;color:var(--text2);}
+.muted{color:var(--text3);font-size:11px;}
+.key-ok{color:var(--green);font-size:11px;font-family:'Space Mono',monospace;}
+
+/* Toasts */
+.toasts{position:fixed;bottom:20px;right:20px;z-index:999;display:flex;flex-direction:column;gap:7px;pointer-events:none;}
+.toast{padding:10px 15px;border-radius:9px;font-size:12px;font-weight:600;
+  background:var(--bg3);border:1px solid var(--border2);color:var(--text);
+  box-shadow:0 6px 20px rgba(0,0,0,.5);animation:tin .25s ease;pointer-events:all;}
+.toast.ok{border-color:var(--green);background:rgba(45,232,122,.1);color:var(--green);}
+.toast.err{border-color:var(--red);background:rgba(252,60,106,.1);color:var(--red);}
+.toast.info{border-color:var(--cyan);background:rgba(60,240,252,.06);color:var(--cyan);}
+@keyframes tin{from{transform:translateX(36px);opacity:0;}to{transform:translateX(0);opacity:1;}}
+::-webkit-scrollbar{width:4px;}::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px;}
+</style>
+</head>
+<body>
+<div id="app">
+
+<header>
+  <div class="logo">
+    <div class="logo-icon">🌀</div>
+    <div class="logo-text">Portal</div>
+  </div>
+  <div class="btn-settings" onclick="openSettings()">⚙</div>
+</header>
+
+<main>
+<div class="left">
+
+  <!-- ── AUTO BUTTON ─────────────────────────────────────────────────────────
+       Click once to start. Portal opens claude.ai in a browser window and
+       watches silently. The moment your usage runs out it opens duck.ai in
+       a fresh incognito window automatically. Click again to stop.
+  ──────────────────────────────────────────────────────────────────────────── -->
+  <div class="auto-section">
+
+    <button class="auto-btn off" id="autoBtn" onclick="toggleAuto()">
+      <div class="auto-btn-inner" id="autoBtnInner">
+        <span class="auto-icon">⚡</span>
+        <div class="auto-label">
+          <div class="auto-label-main">Auto</div>
+          <div class="auto-label-sub">CLICK TO ACTIVATE</div>
+        </div>
+      </div>
+    </button>
+
+    <div class="auto-status" id="autoStatus">Watches claude.ai · opens duck.ai when usage runs out</div>
+
+    <!-- Manual open duck.ai -->
+    <button class="duck-btn" onclick="openDuck()">
+      🦆 &nbsp;Open duck.ai now &nbsp;<span style="font-size:10px;opacity:.5;">incognito</span>
+    </button>
+
+    <!-- Live log -->
+    <div class="log-box" id="logBox">
+      <div class="log-line"><span class="ts">--:--</span>Ready.</div>
+    </div>
+
+  </div>
+
+  <div class="divider">
+    <div class="divider-line"></div>
+    <div class="divider-text">Summarize a chat</div>
+    <div class="divider-line"></div>
+  </div>
+
+  <!-- Summarizer -->
+  <div class="sum-section">
+    <div class="section-label">Paste conversation</div>
+    <textarea class="paste-area" id="pasteArea"
+      placeholder="Paste any AI chat here and hit Summarize..."
+      oninput="updateCount()"></textarea>
+    <div class="char-count" id="charCount">0 chars</div>
+    <button class="btn-sum" id="btnSum" onclick="summarize()">Summarize with Cohere</button>
+  </div>
+
+</div>
+
+<!-- Right panel -->
+<div class="right">
+  <div class="right-header">
+    <div class="right-title">Summaries</div>
+    <button class="btn-sm del" onclick="clearAll()">Clear all</button>
+  </div>
+  <div class="summaries" id="summaryList">
+    <div class="empty" id="emptyState">
+      <div class="icon">📋</div>
+      <p>Summaries appear here</p>
+    </div>
+  </div>
+</div>
+</main>
+</div>
+
+<!-- Detail overlay -->
+<div class="overlay" id="detailOverlay">
+  <div class="panel">
+    <div class="panel-header">
+      <div>
+        <div class="panel-title" id="dTitle"></div>
+        <div class="muted" style="margin-top:4px;font-family:'Space Mono',monospace;font-size:9px;" id="dMeta"></div>
+      </div>
+      <button class="btn-close" onclick="closeDetail()">✕</button>
+    </div>
+    <div class="panel-body" id="dBody"></div>
+    <div class="panel-footer">
+      <button class="btn-copy" onclick="copyDetail()">📋 Copy</button>
+      <button class="btn-dl" onclick="downloadDetail()">⬇ Download</button>
+      <button class="btn-copy" onclick="deleteDetail()" style="margin-left:auto;color:var(--red);">🗑 Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- Settings overlay -->
+<div class="overlay" id="settingsOverlay">
+  <div class="panel sm">
+    <div class="panel-header">
+      <div class="panel-title">Settings</div>
+      <button class="btn-close" onclick="closeSettings()">✕</button>
+    </div>
+    <div class="panel-body">
+      <div class="form-row">
+        <label class="form-label">Cohere API Key</label>
+        <div style="display:flex;gap:8px;">
+          <input class="form-input" id="cohereKey" type="password" placeholder="Paste your Cohere key..."/>
+          <button class="btn-sm" onclick="testKey()" style="white-space:nowrap;padding:0 12px;">Test</button>
+        </div>
+        <div class="muted">Free at cohere.com — only used to summarize chats</div>
+        <div id="keyStatus"></div>
+      </div>
+    </div>
+    <div class="panel-footer">
+      <button class="btn-full btn-primary" onclick="saveSettings()">Save</button>
+      <button class="btn-full btn-ghost" onclick="closeSettings()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<script>
+let summaries = [];
+let current = null;
+let autoRunning = false;
+let evtSource = null;
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+async function init() {
+  summaries = await api('GET', '/api/summaries');
+  render();
+  // check if monitor was already running (e.g. page refresh)
+  const st = await api('GET', '/api/auto/status');
+  if (st.running) setAutoUI(true);
+  connectSSE();
+}
+
+// ── Server-Sent Events (live log from monitor) ────────────────────────────────
+function connectSSE() {
+  evtSource = new EventSource('/api/events');
+  evtSource.onmessage = e => {
+    const d = JSON.parse(e.data);
+    if (d.type === 'log') addLog(d.msg, d.level);
+    if (d.type === 'triggered') {
+      addLog('duck.ai opened in incognito! 🦆', 'triggered');
+      toast('duck.ai opened automatically 🦆', 'ok');
+      setAutoUI(false);
+      autoRunning = false;
+    }
+    if (d.type === 'status' && !d.running) {
+      setAutoUI(false);
+      autoRunning = false;
+    }
+  };
+}
+
+// ── Auto button ───────────────────────────────────────────────────────────────
+async function toggleAuto() {
+  if (autoRunning) {
+    await api('POST', '/api/auto/stop');
+    setAutoUI(false);
+    autoRunning = false;
+    toast('Auto monitor stopped', 'info');
+  } else {
+    try {
+      await api('POST', '/api/auto/start');
+      setAutoUI(true);
+      autoRunning = true;
+      toast('Watching claude.ai for usage limit...', 'info');
+    } catch (e) {
+      toast(e.message, 'err');
+    }
+  }
+}
+
+function setAutoUI(on) {
+  const btn = document.getElementById('autoBtn');
+  const inner = document.getElementById('autoBtnInner');
+  const status = document.getElementById('autoStatus');
+  btn.className = 'auto-btn ' + (on ? 'on' : 'off');
+  if (on) {
+    inner.innerHTML = `
+      <span class="pulse-dot"></span>
+      <div class="auto-label">
+        <div class="auto-label-main">Watching...</div>
+        <div class="auto-label-sub">CLICK TO STOP</div>
+      </div>`;
+    status.textContent = 'Monitoring claude.ai — will open duck.ai when usage runs out';
+    status.className = 'auto-status watching';
+  } else {
+    inner.innerHTML = `
+      <span class="auto-icon">⚡</span>
+      <div class="auto-label">
+        <div class="auto-label-main">Auto</div>
+        <div class="auto-label-sub">CLICK TO ACTIVATE</div>
+      </div>`;
+    status.textContent = 'Watches claude.ai · opens duck.ai when usage runs out';
+    status.className = 'auto-status';
+  }
+}
+
+// ── Manual open duck.ai ───────────────────────────────────────────────────────
+async function openDuck() {
+  try {
+    await api('POST', '/api/open-duck');
+    toast('duck.ai opened in incognito 🦆', 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+// ── Log ───────────────────────────────────────────────────────────────────────
+function addLog(msg, level) {
+  const box = document.getElementById('logBox');
+  const el = document.createElement('div');
+  el.className = 'log-line ' + (level || '');
+  const ts = new Date().toLocaleTimeString('en', { hour12: false, hour: '2-digit', minute: '2-digit' });
+  el.innerHTML = `<span class="ts">${ts}</span>${esc(msg)}`;
+  box.prepend(el);
+  while (box.children.length > 60) box.removeChild(box.lastChild);
+}
+
+// ── Summarize ─────────────────────────────────────────────────────────────────
+async function summarize() {
+  const content = document.getElementById('pasteArea').value.trim();
+  if (!content) { toast('Paste something first', 'err'); return; }
+  const btn = document.getElementById('btnSum');
+  btn.textContent = 'Summarizing...'; btn.disabled = true;
+  try {
+    const result = await api('POST', '/api/summarize', { content });
+    summaries.unshift(result); render();
+    document.getElementById('pasteArea').value = ''; updateCount();
+    toast('Summary saved: ' + result.title, 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+  finally { btn.textContent = 'Summarize with Cohere'; btn.disabled = false; }
+}
+
+function updateCount() {
+  document.getElementById('charCount').textContent = document.getElementById('pasteArea').value.length.toLocaleString() + ' chars';
+}
+
+// ── Summaries ─────────────────────────────────────────────────────────────────
+function render() {
+  const list = document.getElementById('summaryList');
+  const empty = document.getElementById('emptyState');
+  if (!summaries.length) { list.innerHTML = ''; list.appendChild(empty); empty.style.display = 'flex'; return; }
+  empty.style.display = 'none';
+  list.innerHTML = summaries.map(s => `
+    <div class="card" onclick="openDetail('${s.id}')">
+      <div class="card-title">${esc(s.title||'Summary')}</div>
+      <div class="card-preview">${esc(s.summary||'')}</div>
+      <div class="card-meta">
+        <div class="card-time">${fmt(s.createdAt)}</div>
+        <div class="card-actions" onclick="event.stopPropagation()">
+          <button class="btn-sm" onclick="copyById('${s.id}')">Copy</button>
+          <button class="btn-sm del" onclick="del('${s.id}')">Del</button>
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+function openDetail(id) {
+  current = summaries.find(s => s.id === id); if (!current) return;
+  document.getElementById('dTitle').textContent = current.title || 'Summary';
+  document.getElementById('dMeta').textContent = fmt(current.createdAt);
+  let html = '';
+  if (current.summary) html += `<div><div class="detail-label">Summary</div><div class="detail-text">${esc(current.summary)}</div></div>`;
+  if (current.keyPoints?.length) html += `<div><div class="detail-label">Key Points</div><div class="kp-list">${current.keyPoints.map(p=>`<div class="kp">${esc(p)}</div>`).join('')}</div></div>`;
+  if (current.codeSnippets?.filter(Boolean).length) html += `<div><div class="detail-label">Code</div>${current.codeSnippets.filter(Boolean).map(c=>`<div class="code-block">${esc(c)}</div>`).join('')}</div>`;
+  document.getElementById('dBody').innerHTML = html;
+  document.getElementById('detailOverlay').classList.add('open');
+}
+function closeDetail() { document.getElementById('detailOverlay').classList.remove('open'); current = null; }
+function buildText(s) {
+  let t = `PORTAL SUMMARY\n==============\n${s.title||'Summary'}\n${fmt(s.createdAt)}\n\n`;
+  if (s.summary) t += `SUMMARY:\n${s.summary}\n\n`;
+  if (s.keyPoints?.length) t += `KEY POINTS:\n${s.keyPoints.map(p=>'• '+p).join('\n')}\n\n`;
+  if (s.codeSnippets?.filter(Boolean).length) t += `CODE:\n${s.codeSnippets.join('\n\n')}\n`;
+  return t;
+}
+function copyDetail() { if (current) navigator.clipboard.writeText(buildText(current)).then(()=>toast('Copied!','ok')); }
+function copyById(id) { const s=summaries.find(x=>x.id===id); if(s) navigator.clipboard.writeText(buildText(s)).then(()=>toast('Copied!','ok')); }
+function downloadDetail() {
+  if (!current) return;
+  const a = Object.assign(document.createElement('a'),{href:URL.createObjectURL(new Blob([buildText(current)],{type:'text/plain'})),download:`summary-${Date.now()}.txt`});
+  a.click(); URL.revokeObjectURL(a.href); toast('Downloaded','ok');
+}
+async function del(id) { await api('DELETE',`/api/summaries/${id}`); summaries=summaries.filter(s=>s.id!==id); render(); }
+async function deleteDetail() { if(!current)return; await del(current.id); closeDetail(); }
+async function clearAll() { if(!confirm('Clear all?'))return; await api('DELETE','/api/summaries'); summaries=[]; render(); }
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+async function openSettings() {
+  const s = await api('GET','/api/settings');
+  document.getElementById('cohereKey').placeholder = s.cohereKeySet ? 'Key saved — paste to replace' : 'Paste your Cohere key...';
+  document.getElementById('cohereKey').value = '';
+  document.getElementById('keyStatus').textContent = '';
+  document.getElementById('settingsOverlay').classList.add('open');
+}
+function closeSettings() { document.getElementById('settingsOverlay').classList.remove('open'); }
+async function saveSettings() {
+  const key = document.getElementById('cohereKey').value.trim();
+  if (key) await api('POST','/api/settings',{cohereApiKey:key});
+  toast('Saved','ok'); closeSettings();
+}
+async function testKey() {
+  const key = document.getElementById('cohereKey').value.trim();
+  if (key) await api('POST','/api/settings',{cohereApiKey:key});
+  const r = await api('POST','/api/settings/test');
+  const el = document.getElementById('keyStatus');
+  if (r.ok) { el.className='key-ok'; el.textContent='✓ Connected'; toast('Cohere connected!','ok'); }
+  else { el.style.color='var(--red)'; el.textContent='✗ '+(r.error||'Failed'); }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+async function api(m, url, body) {
+  const r = await fetch(url,{method:m,headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
+  if (!r.ok) { const e=await r.json().catch(()=>({error:r.statusText})); throw new Error(e.error||r.statusText); }
+  return r.json();
+}
+function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function fmt(iso){if(!iso)return'';const d=new Date(iso);return d.toLocaleDateString('en',{month:'short',day:'numeric'})+' · '+d.toLocaleTimeString('en',{hour:'2-digit',minute:'2-digit',hour12:true});}
+function toast(msg,type='info'){
+  const c=document.getElementById('toasts'),el=document.createElement('div');
+  el.className='toast '+(type==='ok'?'ok':type==='err'?'err':'info');
+  el.textContent=msg;c.appendChild(el);
+  setTimeout(()=>{el.style.cssText='opacity:0;transform:translateX(36px);transition:all .25s;';setTimeout(()=>el.remove(),250);},3500);
+}
+['detailOverlay','settingsOverlay'].forEach(id=>document.getElementById(id).addEventListener('click',e=>{if(e.target.id===id)id==='detailOverlay'?closeDetail():closeSettings();}));
+
+init();
+</script>
+</body>
+</html>
