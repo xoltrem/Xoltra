@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<title>Portal</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet"/>
+<style>
+:root{
+  --bg:#08080f;--bg2:#10101a;--bg3:#16162a;
+  --border:#20203a;--border2:#30304a;
+  --text:#e8e8f4;--text2:#8888aa;--text3:#44446a;
+  --accent:#7c5cfc;--accent2:#a07cfc;
+  --green:#2de87a;--red:#fc3c6a;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{width:340px;background:var(--bg);color:var(--text);font-family:'Syne',sans-serif;}
+body::before{content:'';position:fixed;inset:0;z-index:0;
+  background-image:linear-gradient(rgba(124,92,252,.02) 1px,transparent 1px),
+  linear-gradient(90deg,rgba(124,92,252,.02) 1px,transparent 1px);
+  background-size:32px 32px;pointer-events:none;}
+#app{position:relative;z-index:1;}
+
+/* header */
+header{display:flex;align-items:center;justify-content:space-between;
+  padding:14px 16px;border-bottom:1px solid var(--border);background:rgba(8,8,15,.95);}
+.logo{display:flex;align-items:center;gap:8px;}
+.logo-icon{width:26px;height:26px;background:linear-gradient(135deg,var(--accent),var(--accent2));
+  border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:13px;
+  box-shadow:0 0 14px rgba(124,92,252,.4);}
+.logo-text{font-size:16px;font-weight:800;background:linear-gradient(135deg,#fff,var(--accent2));
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+#btnSettings{background:none;border:none;color:var(--text3);cursor:pointer;
+  font-size:16px;padding:4px;transition:color .2s;}
+#btnSettings:hover{color:var(--accent);}
+
+/* screens */
+.screen{display:none;}
+.screen.active{display:block;}
+.body{padding:14px;display:flex;flex-direction:column;gap:10px;}
+
+/* auto button */
+#btnAuto{
+  width:100%;height:64px;border:none;border-radius:12px;
+  font-family:'Syne',sans-serif;font-size:17px;font-weight:800;color:#fff;
+  cursor:pointer;display:flex;align-items:center;justify-content:center;
+  position:relative;overflow:hidden;transition:all .25s;
+  background:linear-gradient(135deg,var(--accent),#5a3ccc);
+  box-shadow:0 4px 20px rgba(124,92,252,.45),inset 0 1px 0 rgba(255,255,255,.12);
+}
+#btnAuto::before{content:'';position:absolute;inset:0;
+  background:linear-gradient(180deg,rgba(255,255,255,.1),transparent);pointer-events:none;}
+#btnAuto:hover{transform:translateY(-1px);box-shadow:0 6px 28px rgba(124,92,252,.6);}
+#btnAuto.watching{
+  background:linear-gradient(135deg,#16a34a,#15803d);
+  box-shadow:0 4px 20px rgba(22,163,74,.5);
+  animation:glow 2s infinite;
+}
+@keyframes glow{
+  0%,100%{box-shadow:0 4px 20px rgba(22,163,74,.5);}
+  50%{box-shadow:0 4px 32px rgba(22,163,74,.85);}
+}
+.auto-inner{position:relative;z-index:1;display:flex;align-items:center;gap:10px;}
+.pulse{width:9px;height:9px;border-radius:50%;background:#4ade80;
+  box-shadow:0 0 7px #4ade80;animation:pd 1.2s infinite;flex-shrink:0;}
+@keyframes pd{0%,100%{opacity:1;transform:scale(1);}50%{opacity:.3;transform:scale(.6);}}
+.auto-text{display:flex;flex-direction:column;align-items:flex-start;gap:1px;}
+.auto-main{font-size:17px;font-weight:800;line-height:1;}
+.auto-sub{font-size:9px;font-weight:600;opacity:.65;letter-spacing:.8px;}
+
+/* status text */
+#autoStatus{font-family:'Space Mono',monospace;font-size:10px;
+  color:var(--text3);text-align:center;min-height:14px;transition:color .3s;}
+#autoStatus.on{color:var(--green);}
+
+/* sum box */
+.sum-box{background:var(--bg2);border:1px solid var(--border);
+  border-radius:10px;padding:11px;display:flex;flex-direction:column;gap:7px;}
+.box-label{font-size:9px;font-weight:700;letter-spacing:2px;
+  text-transform:uppercase;color:var(--text3);}
+#sumStatus{font-size:10px;color:var(--text2);line-height:1.4;}
+#sumStatus.ready{color:var(--green);}
+#btnSum{width:100%;height:36px;border:none;border-radius:7px;
+  background:linear-gradient(135deg,var(--green),#18c860);
+  font-family:'Syne',sans-serif;font-size:12px;font-weight:700;
+  color:#fff;cursor:pointer;transition:all .2s;}
+#btnSum:hover:not(:disabled){filter:brightness(1.1);}
+#btnSum:disabled{opacity:.3;cursor:not-allowed;}
+
+/* summaries list */
+.list-label{font-size:9px;font-weight:700;letter-spacing:2px;
+  text-transform:uppercase;color:var(--text3);padding:0 2px;}
+#sumList{display:flex;flex-direction:column;gap:7px;max-height:200px;overflow-y:auto;}
+#sumList::-webkit-scrollbar{width:3px;}
+#sumList::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px;}
+.card{background:var(--bg3);border:1px solid var(--border);border-radius:9px;
+  padding:10px;cursor:pointer;transition:border-color .15s;animation:ci .25s ease;}
+.card:hover{border-color:var(--accent);}
+@keyframes ci{from{opacity:0;transform:translateY(-4px);}to{opacity:1;transform:translateY(0);}}
+.card-title{font-size:12px;font-weight:700;margin-bottom:3px;}
+.card-preview{font-size:10px;color:var(--text2);line-height:1.4;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+.card-meta{display:flex;align-items:center;justify-content:space-between;margin-top:7px;}
+.card-time{font-family:'Space Mono',monospace;font-size:8px;color:var(--text3);}
+.card-btns{display:flex;gap:4px;opacity:0;transition:opacity .15s;}
+.card:hover .card-btns{opacity:1;}
+.empty{text-align:center;padding:18px 0;color:var(--text3);font-size:10px;}
+
+/* shared small buttons */
+.bx{padding:2px 8px;border-radius:4px;font-family:'Space Mono',monospace;font-size:8px;
+  border:1px solid var(--border2);background:var(--bg2);color:var(--text2);cursor:pointer;}
+.bx:hover{border-color:var(--accent);color:var(--accent);}
+.bx.d:hover{border-color:var(--red);color:var(--red);}
+
+/* nav bar for sub screens */
+.nav{display:flex;align-items:center;gap:8px;padding:14px 14px 0;}
+.nav-title{font-size:13px;font-weight:700;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;}
+.btn-back{padding:7px 12px;border-radius:7px;border:1px solid var(--border2);
+  background:var(--bg2);font-family:'Syne',sans-serif;font-weight:700;
+  font-size:11px;color:var(--text2);cursor:pointer;white-space:nowrap;}
+.btn-back:hover{color:var(--text);border-color:var(--border);}
+
+/* settings */
+.s-body{padding:12px 14px 14px;display:flex;flex-direction:column;gap:11px;}
+.s-row{display:flex;flex-direction:column;gap:5px;}
+.s-label{font-size:10px;font-weight:700;color:var(--text2);letter-spacing:.5px;}
+.s-row-h{display:flex;gap:6px;}
+.s-input{background:var(--bg2);border:1px solid var(--border);border-radius:7px;
+  padding:8px 11px;color:var(--text);font-family:'Syne',sans-serif;
+  font-size:12px;outline:none;transition:border-color .2s;width:100%;}
+.s-input:focus{border-color:var(--accent);}
+.btn-save{flex:1;padding:9px;border-radius:7px;border:none;
+  background:linear-gradient(135deg,var(--accent),var(--accent2));
+  font-family:'Syne',sans-serif;font-weight:700;font-size:12px;color:#fff;cursor:pointer;}
+.btn-save:hover{filter:brightness(1.1);}
+.muted{font-size:10px;color:var(--text3);line-height:1.5;}
+#keyStatus{font-size:10px;min-height:14px;}
+#keyStatus.ok{color:var(--green);}
+#keyStatus.err{color:var(--red);}
+
+/* detail */
+.d-scroll{max-height:320px;overflow-y:auto;padding:10px 14px 0;}
+.d-scroll::-webkit-scrollbar{width:3px;}
+.d-scroll::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px;}
+.d-section{margin-bottom:12px;}
+.d-label{font-size:9px;font-weight:700;letter-spacing:2px;
+  text-transform:uppercase;color:var(--text3);margin-bottom:5px;}
+.d-text{font-size:11px;line-height:1.6;color:var(--text2);background:var(--bg2);
+  border:1px solid var(--border);border-radius:7px;padding:10px;}
+.kp{display:flex;gap:7px;font-size:11px;color:var(--text2);line-height:1.4;margin-bottom:4px;}
+.kp::before{content:'▸';color:var(--accent);flex-shrink:0;}
+.d-foot{display:flex;gap:6px;padding:10px 14px 14px;}
+
+/* toast */
+.toast{position:fixed;bottom:10px;left:50%;transform:translateX(-50%);
+  padding:7px 14px;border-radius:7px;font-size:11px;font-weight:600;
+  background:var(--bg3);border:1px solid var(--border2);color:var(--text);
+  white-space:nowrap;box-shadow:0 4px 14px rgba(0,0,0,.5);
+  animation:ti .2s ease;z-index:999;pointer-events:none;}
+.toast.ok{border-color:var(--green);background:rgba(45,232,122,.1);color:var(--green);}
+.toast.err{border-color:var(--red);background:rgba(252,60,106,.1);color:var(--red);}
+@keyframes ti{
+  from{opacity:0;transform:translateX(-50%) translateY(6px);}
+  to{opacity:1;transform:translateX(-50%) translateY(0);}
+}
+::-webkit-scrollbar{width:3px;}
+::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px;}
+</style>
+</head>
+<body>
+<div id="app">
+
+  <header>
+    <div class="logo">
+      <div class="logo-icon">🌀</div>
+      <div class="logo-text">Portal</div>
+    </div>
+    <button id="btnSettings">⚙</button>
+  </header>
+
+  <!-- MAIN -->
+  <div class="screen active" id="screenMain">
+    <div class="body">
+
+      <button id="btnAuto">
+        <div class="auto-inner" id="autoInner">
+          <span style="font-size:22px;position:relative;z-index:1;">⚡</span>
+          <div class="auto-text">
+            <div class="auto-main">Auto</div>
+            <div class="auto-sub">CLICK TO OPEN DUCK.AI</div>
+          </div>
+        </div>
+      </button>
+
+      <div id="autoStatus">Opens duck.ai in incognito + auto-summarizes</div>
+
+      <div class="sum-box">
+        <div class="box-label">Summarize Conversation</div>
+        <div id="sumStatus">Click Auto to open duck.ai first</div>
+        <button id="btnSum" disabled>Summarize with Cohere</button>
+      </div>
+
+      <div class="list-label">Saved Summaries</div>
+      <div id="sumList"><div class="empty">No summaries yet</div></div>
+
+    </div>
+  </div>
+
+  <!-- SETTINGS -->
+  <div class="screen" id="screenSettings">
+    <div class="nav">
+      <button class="btn-back" id="btnBack">← Back</button>
+      <div class="nav-title">Settings</div>
+    </div>
+    <div class="s-body">
+      <div class="s-row">
+        <label class="s-label">Cohere API Key</label>
+        <div class="s-row-h">
+          <input class="s-input" id="cohereKey" type="password" placeholder="Paste your key..."/>
+          <button class="bx" id="btnTest" style="padding:0 12px;white-space:nowrap;">Test</button>
+        </div>
+        <div class="muted">Free at cohere.com — only used for summarizing</div>
+        <div id="keyStatus"></div>
+      </div>
+      <div class="s-row-h">
+        <button class="btn-save" id="btnSave">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- DETAIL -->
+  <div class="screen" id="screenDetail">
+    <div class="nav">
+      <button class="btn-back" id="btnBackDetail">← Back</button>
+      <div class="nav-title" id="detailTitle"></div>
+    </div>
+    <div class="d-scroll">
+      <div id="detailBody"></div>
+    </div>
+    <div class="d-foot">
+      <button class="bx" id="btnCopy" style="padding:5px 10px;">📋 Copy</button>
+      <button class="bx" id="btnDl" style="padding:5px 10px;">⬇ Download</button>
+      <button class="bx d" id="btnDel" style="padding:5px 10px;margin-left:auto;">🗑 Delete</button>
+    </div>
+  </div>
+
+</div>
+<script src="popup.js"></script>
+</body>
+</html>
