@@ -32,6 +32,11 @@ CORS(app, origins=["http://localhost:3000", "http://localhost:5173"])
 # init_storage() is already called here — xke never calls it again
 # (ensure_knowledge_base_ready() is only for Streamlit sessions)
 kdb.init_storage()
+from simulation_routes import register_simulation_routes
+import unity_bridge
+
+register_simulation_routes(app)
+unity_bridge.start_bridge()
 pipeline = get_pipeline()
 
 
