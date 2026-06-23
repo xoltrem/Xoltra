@@ -5,3 +5,5 @@ chromadb
 pypdf
 python-dotenv
 websockets>=12.0
+Jinja2
+APScheduler
