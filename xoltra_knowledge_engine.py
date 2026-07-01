@@ -37,6 +37,7 @@ _MAX_CONTEXT_CHARS = int(_MAX_CONTEXT_TOKENS * _CHARS_PER_TOKEN)  # 1750 chars
 # ═══════════════════════════════════════════════════════════════════
 
 def compact_session(
+    user_id: str,
     messages: list[dict],
     session_topic: Optional[str] = None,
 ) -> Optional[dict]:
@@ -141,9 +142,9 @@ Return ONLY valid JSON — no markdown, no explanation:
 
     # ── Store ──────────────────────────────────────────────────────────────
     try:
-        node_id   = kdb.create_node(node_type=node_type, content=content, metadata=metadata)
+        node_id   = kdb.create_node(user_id, node_type=node_type, content=content, metadata=metadata)
         node_data = {"type": node_type, "content": content}
-        knowledge_agent.auto_link_node(node_id, node_data)
+        knowledge_agent.auto_link_node(user_id, node_id, node_data)
 
         logger.info(f"[Compaction] Stored {node_type} node {node_id[:8]} — '{title}'")
 
@@ -183,6 +184,7 @@ def _fallback_classification(messages: list[dict], topic: Optional[str]) -> dict
 # ═══════════════════════════════════════════════════════════════════
 
 def build_aware_system_prompt(
+    user_id: str,
     base_prompt: str,
     user_message: str,
     mode: str = "fast",
@@ -204,13 +206,13 @@ def build_aware_system_prompt(
         Returns base_prompt unchanged if nothing relevant is found.
     """
     # ── 1. Retrieve context nodes ──────────────────────────────────────────
-    context_nodes = get_context_by_mode(user_message, mode)
+    context_nodes = get_context_by_mode(user_id, user_message, mode)
 
     # ── 2. Fetch insight nodes specifically ───────────────────────────────
     # Insights encode user patterns like "prefers technical depth" —
     # these are fetched directly, not via semantic search, because they
     # describe the user rather than a specific topic.
-    insight_nodes = _get_insight_nodes(user_message)
+    insight_nodes = _get_insight_nodes(user_id, user_message)
 
     if not context_nodes and not insight_nodes:
         return base_prompt
@@ -255,7 +257,7 @@ def build_aware_system_prompt(
     return trimmed_block + base_prompt
 
 
-def _get_insight_nodes(user_message: str, max_insights: int = 3) -> list[dict]:
+def _get_insight_nodes(user_id: str, user_message: str, max_insights: int = 3) -> list[dict]:
     """
     Retrieve the most relevant insight nodes for persona injection.
     Uses semantic search scoped to type=insight, then falls back to
@@ -264,6 +266,7 @@ def _get_insight_nodes(user_message: str, max_insights: int = 3) -> list[dict]:
     try:
         # First: semantic search for topic-relevant insights
         semantic_insights = kdb.semantic_search(
+            user_id,
             query=user_message,
             top_k=max_insights,
             node_types=["insight"],
@@ -273,7 +276,7 @@ def _get_insight_nodes(user_message: str, max_insights: int = 3) -> list[dict]:
             return semantic_insights[:max_insights]
 
         # Fallback: most recent insights regardless of topic relevance
-        all_insights = kdb.get_nodes_by_type("insight", status="active")
+        all_insights = kdb.get_nodes_by_type(user_id, "insight", status="active")
         # Sort by created_at descending
         all_insights.sort(key=lambda n: n.get("created_at", ""), reverse=True)
         return all_insights[:max_insights]
@@ -324,6 +327,7 @@ def _trim_to_token_budget(text: str, max_chars: int) -> str:
 # ═══════════════════════════════════════════════════════════════════
 
 def get_context_by_mode(
+    user_id: str,
     user_input: str,
     mode: str = "fast",
 ) -> list[dict]:
@@ -350,24 +354,24 @@ def get_context_by_mode(
         Empty list if nothing relevant found or KB not yet populated.
     """
     if mode == "thinking":
-        return _get_thinking_context(user_input)
-    return _get_fast_context(user_input)
+        return _get_thinking_context(user_id, user_input)
+    return _get_fast_context(user_id, user_input)
 
 
-def _get_fast_context(user_input: str) -> list[dict]:
+def _get_fast_context(user_id: str, user_input: str) -> list[dict]:
     """
     Fast mode: single best match, no edge traversal.
     Target latency overhead: < 100ms.
     """
     try:
-        results = kdb.get_relevant_context(user_input, top_k=1)
+        results = kdb.get_relevant_context(user_id, user_input, top_k=1)
         return results
     except Exception as e:
         logger.warning(f"[Context/Fast] Retrieval failed: {e}")
         return []
 
 
-def _get_thinking_context(user_input: str) -> list[dict]:
+def _get_thinking_context(user_id: str, user_input: str) -> list[dict]:
     """
     Thinking mode: top 5 nodes + edge traversal + active insights.
 
@@ -383,7 +387,7 @@ def _get_thinking_context(user_input: str) -> list[dict]:
 
     # ── 1. Primary nodes — top 5 semantic matches ──────────────────────────
     try:
-        primary = kdb.get_relevant_context(user_input, top_k=5)
+        primary = kdb.get_relevant_context(user_id, user_input, top_k=5)
     except Exception as e:
         logger.warning(f"[Context/Thinking] Primary retrieval failed: {e}")
         primary = []
@@ -399,7 +403,7 @@ def _get_thinking_context(user_input: str) -> list[dict]:
     # Limit: 2 outgoing edges per primary node to control context size.
     for node in primary:
         try:
-            edges = kdb.get_node_edges(node["id"], direction="outgoing")[:2]
+            edges = kdb.get_node_edges(user_id, node["id"], direction="outgoing")[:2]
         except Exception:
             continue
 
@@ -409,7 +413,7 @@ def _get_thinking_context(user_input: str) -> list[dict]:
                 continue
 
             try:
-                neighbour = kdb.get_node(neighbour_id, update_access=False)
+                neighbour = kdb.get_node(user_id, neighbour_id, update_access=False)
             except Exception:
                 continue
 
@@ -426,7 +430,7 @@ def _get_thinking_context(user_input: str) -> list[dict]:
     # Insights describe user behaviour patterns; they're always relevant in
     # thinking mode regardless of semantic proximity to the current query.
     try:
-        insights = kdb.get_nodes_by_type("insight", status="active")
+        insights = kdb.get_nodes_by_type(user_id, "insight", status="active")
         for insight in insights[:3]:          # cap at 3 to respect token budget
             iid = insight["id"]
             if iid not in seen_ids:
