@@ -30,6 +30,7 @@ from flask import Blueprint, request, jsonify
 import workflow_store
 import workflow_engine
 import node_library
+from auth import require_auth, get_current_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -53,14 +54,16 @@ def _ok(data: dict):
 # ═══════════════════════════════════════════════════
 
 @_wf_bp.route("/api/workflows", methods=["GET"])
+@require_auth
 def list_workflows():
     """
     List all workflows.
     Query param: ?status=draft|published (optional)
     """
+    user_id = get_current_user_id()
     status_filter = request.args.get("status")
     try:
-        workflows = workflow_store.list_workflows(status=status_filter)
+        workflows = workflow_store.list_workflows(user_id, status=status_filter)
         return _ok({"workflows": workflows, "count": len(workflows)})
     except ValueError as e:
         return _err(str(e))
@@ -70,11 +73,13 @@ def list_workflows():
 
 
 @_wf_bp.route("/api/workflows", methods=["POST"])
+@require_auth
 def create_workflow():
     """
     Create a new workflow.
     Body: { "name": str, "status": "draft"|"published", "graph": { "nodes": [], "edges": [] } }
     """
+    user_id = get_current_user_id()
     body = request.get_json(silent=True) or {}
 
     name = (body.get("name") or "").strip()
@@ -82,12 +87,12 @@ def create_workflow():
         return _err("'name' is required")
 
     try:
-        workflow_id = workflow_store.save_workflow({
+        workflow_id = workflow_store.save_workflow(user_id, {
             "name":   name,
             "status": body.get("status", "draft"),
             "graph":  body.get("graph", {"nodes": [], "edges": []}),
         })
-        workflow = workflow_store.get_workflow(workflow_id)
+        workflow = workflow_store.get_workflow(user_id, workflow_id)
         return _ok({"workflow": workflow}), 201
     except ValueError as e:
         return _err(str(e))
@@ -97,10 +102,12 @@ def create_workflow():
 
 
 @_wf_bp.route("/api/workflows/<workflow_id>", methods=["GET"])
+@require_auth
 def get_workflow(workflow_id: str):
     """Get a single workflow by ID."""
+    user_id = get_current_user_id()
     try:
-        workflow = workflow_store.get_workflow(workflow_id)
+        workflow = workflow_store.get_workflow(user_id, workflow_id)
         if not workflow:
             return _err("Workflow not found", 404)
         return _ok({"workflow": workflow})
@@ -110,16 +117,18 @@ def get_workflow(workflow_id: str):
 
 
 @_wf_bp.route("/api/workflows/<workflow_id>", methods=["PUT"])
+@require_auth
 def update_workflow(workflow_id: str):
     """
     Update an existing workflow.
     Body: { "name": str, "status": str, "graph": {} }
     All fields are optional — only provided fields are updated.
     """
+    user_id = get_current_user_id()
     body = request.get_json(silent=True) or {}
 
     try:
-        existing = workflow_store.get_workflow(workflow_id)
+        existing = workflow_store.get_workflow(user_id, workflow_id)
         if not existing:
             return _err("Workflow not found", 404)
 
@@ -131,8 +140,8 @@ def update_workflow(workflow_id: str):
             "graph":  body.get("graph", existing["graph"]),
         }
 
-        workflow_store.save_workflow(update)
-        workflow = workflow_store.get_workflow(workflow_id)
+        workflow_store.save_workflow(user_id, update)
+        workflow = workflow_store.get_workflow(user_id, workflow_id)
         return _ok({"workflow": workflow})
 
     except ValueError as e:
@@ -143,10 +152,12 @@ def update_workflow(workflow_id: str):
 
 
 @_wf_bp.route("/api/workflows/<workflow_id>", methods=["DELETE"])
+@require_auth
 def delete_workflow(workflow_id: str):
     """Delete a workflow by ID."""
+    user_id = get_current_user_id()
     try:
-        workflow_store.delete_workflow(workflow_id)
+        workflow_store.delete_workflow(user_id, workflow_id)
         return _ok({"deleted": workflow_id})
     except ValueError as e:
         return _err(str(e), 404)
@@ -160,6 +171,7 @@ def delete_workflow(workflow_id: str):
 # ═══════════════════════════════════════════════════
 
 @_wf_bp.route("/api/workflows/<workflow_id>/run", methods=["POST"])
+@require_auth
 def run_workflow(workflow_id: str):
     """
     Execute a workflow.
@@ -169,16 +181,17 @@ def run_workflow(workflow_id: str):
     For long-running workflows, consider running in a background thread
     and polling /runs/<run_id>.
     """
+    user_id = get_current_user_id()
     body = request.get_json(silent=True) or {}
     trigger_data = body.get("trigger_data", {})
 
     try:
         # Verify workflow exists before running
-        workflow = workflow_store.get_workflow(workflow_id)
+        workflow = workflow_store.get_workflow(user_id, workflow_id)
         if not workflow:
             return _err("Workflow not found", 404)
 
-        result = workflow_engine.run_workflow(workflow_id, trigger_data=trigger_data)
+        result = workflow_engine.run_workflow(user_id, workflow_id, trigger_data=trigger_data)
         return _ok({"run": result})
 
     except ValueError as e:
@@ -189,10 +202,12 @@ def run_workflow(workflow_id: str):
 
 
 @_wf_bp.route("/api/workflows/<workflow_id>/runs", methods=["GET"])
+@require_auth
 def list_runs(workflow_id: str):
     """List run history for a workflow, newest first."""
+    user_id = get_current_user_id()
     try:
-        runs = workflow_engine.list_runs(workflow_id)
+        runs = workflow_engine.list_runs(user_id, workflow_id)
         return _ok({"runs": runs, "count": len(runs)})
     except Exception as e:
         logger.error(f"[/api/workflows/{workflow_id}/runs] {e}\n{traceback.format_exc()}")
@@ -200,10 +215,12 @@ def list_runs(workflow_id: str):
 
 
 @_wf_bp.route("/api/workflows/<workflow_id>/runs/<run_id>", methods=["GET"])
+@require_auth
 def get_run(workflow_id: str, run_id: str):
     """Get a single run result."""
+    user_id = get_current_user_id()
     try:
-        run = workflow_engine.get_run(run_id)
+        run = workflow_engine.get_run(user_id, run_id)
         if not run:
             return _err("Run not found", 404)
         if run.get("workflow_id") != workflow_id:
@@ -219,6 +236,7 @@ def get_run(workflow_id: str, run_id: str):
 # ═══════════════════════════════════════════════════
 
 @_wf_bp.route("/api/nodes", methods=["GET"])
+@require_auth
 def list_nodes():
     """
     List all available node definitions from the node library.
@@ -237,11 +255,13 @@ def list_nodes():
 # ═══════════════════════════════════════════════════
 
 @_wf_bp.route("/api/workflows/<workflow_id>/duplicate", methods=["POST"])
+@require_auth
 def duplicate_workflow(workflow_id: str):
     """Duplicate a workflow. Returns the new workflow."""
+    user_id = get_current_user_id()
     try:
-        new_id = workflow_store.duplicate_workflow(workflow_id)
-        new_workflow = workflow_store.get_workflow(new_id)
+        new_id = workflow_store.duplicate_workflow(user_id, workflow_id)
+        new_workflow = workflow_store.get_workflow(user_id, new_id)
         return _ok({"workflow": new_workflow}), 201
     except ValueError as e:
         return _err(str(e), 404)
