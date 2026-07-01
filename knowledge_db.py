@@ -10,6 +10,7 @@ Key fixes from v1:
 - get_node() accepts update_access param
 - get_node_edges() accepts edge_type filter
 - Relevance boost capped at 1.0
+- Multi-tenant data isolation via user_id
 """
 
 import sqlite3
@@ -28,7 +29,6 @@ VECTOR_PATH = "./chroma_db"
 # Thread-local storage for SQLite connections
 _local          = threading.local()
 _chroma_client     = None
-_chroma_collection = None
 _initialized       = False
 
 
@@ -42,7 +42,7 @@ def init_storage():
     Safe to call multiple times — idempotent.
     Must be called before any other function.
     """
-    global _chroma_client, _chroma_collection, _initialized
+    global _chroma_client, _initialized
 
     if _initialized:
         return
@@ -55,14 +55,10 @@ def init_storage():
     try:
         import chromadb
         _chroma_client = chromadb.PersistentClient(path=VECTOR_PATH)
-        _chroma_collection = _chroma_client.get_or_create_collection(
-            name="xoltaos_knowledge",
-            metadata={"hnsw:space": "cosine"}
-        )
         logger.info("[Knowledge] ChromaDB initialized")
     except Exception as e:
         logger.warning(f"[Knowledge] ChromaDB unavailable: {e} — vector search disabled")
-        _chroma_collection = None
+        _chroma_client = None
 
     _initialized = True
     logger.info("[Knowledge] Storage initialized")
@@ -79,12 +75,20 @@ def _get_conn() -> sqlite3.Connection:
     return _local.conn
 
 
+def _add_column_if_not_exists(cursor, table, column, definition):
+    try:
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" not in str(e).lower():
+            raise
+
 def _create_tables(conn: sqlite3.Connection):
     cursor = conn.cursor()
 
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS nodes (
         id              TEXT PRIMARY KEY,
+        user_id         TEXT NOT NULL DEFAULT 'default',
         type            TEXT NOT NULL,
         content         TEXT NOT NULL,
         metadata        TEXT NOT NULL DEFAULT '{}',
@@ -99,6 +103,7 @@ def _create_tables(conn: sqlite3.Connection):
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS edges (
         id          TEXT PRIMARY KEY,
+        user_id     TEXT NOT NULL DEFAULT 'default',
         from_node   TEXT NOT NULL,
         to_node     TEXT NOT NULL,
         edge_type   TEXT NOT NULL,
@@ -114,6 +119,7 @@ def _create_tables(conn: sqlite3.Connection):
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS insights (
         id             TEXT PRIMARY KEY,
+        user_id        TEXT NOT NULL DEFAULT 'default',
         pattern        TEXT NOT NULL,
         confidence     REAL NOT NULL,
         actionable     INTEGER DEFAULT 0,
@@ -121,6 +127,11 @@ def _create_tables(conn: sqlite3.Connection):
         surfaced_count INTEGER DEFAULT 0
     )
     """)
+    
+    # Migrations for existing DBs
+    _add_column_if_not_exists(cursor, "nodes", "user_id", "TEXT NOT NULL DEFAULT 'default'")
+    _add_column_if_not_exists(cursor, "edges", "user_id", "TEXT NOT NULL DEFAULT 'default'")
+    _add_column_if_not_exists(cursor, "insights", "user_id", "TEXT NOT NULL DEFAULT 'default'")
 
     # Indexes for performance — critical once edges table grows
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_edges_from   ON edges(from_node)")
@@ -128,6 +139,10 @@ def _create_tables(conn: sqlite3.Connection):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_edges_type   ON edges(edge_type)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_nodes_type   ON nodes(type, status)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_nodes_status ON nodes(status)")
+    
+    # New multi-tenant indexes
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_nodes_user   ON nodes(user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_edges_user   ON edges(user_id)")
 
     conn.commit()
 
@@ -138,12 +153,25 @@ def _require_init():
             "Knowledge Engine not initialized. Call kdb.init_storage() first."
         )
 
+def _get_user_collection(user_id: str):
+    """Get or create a ChromaDB collection specifically for this user."""
+    if _chroma_client is None:
+        return None
+    # Sanitize user_id for collection name (must be alphanumeric/underscore/hyphen, 3-63 chars)
+    safe_user_id = "".join(c for c in user_id if c.isalnum() or c in "-_")
+    collection_name = f"knowledge_{safe_user_id}"
+    return _chroma_client.get_or_create_collection(
+        name=collection_name,
+        metadata={"hnsw:space": "cosine"}
+    )
+
 
 # ═══════════════════════════════════════════════════
 # NODE OPERATIONS
 # ═══════════════════════════════════════════════════
 
 def create_node(
+    user_id: str,
     node_type: str,
     content: dict,
     metadata: dict = None,
@@ -163,10 +191,10 @@ def create_node(
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO nodes
-            (id, type, content, metadata, execution_state, created_at, last_accessed, access_count, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, user_id, type, content, metadata, execution_state, created_at, last_accessed, access_count, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
-        node_id, node_type,
+        node_id, user_id, node_type,
         json.dumps(content), json.dumps(meta),
         json.dumps(execution_state) if execution_state else None,
         now, now, 0, "active"
@@ -174,13 +202,14 @@ def create_node(
     conn.commit()
 
     # Store embedding in ChromaDB if available
-    if _chroma_collection is not None:
+    collection = _get_user_collection(user_id)
+    if collection is not None:
         try:
             from llm import generate_embedding
             text      = _prepare_embedding_text(node_type, content)
-            embedding = generate_embedding(text)
+            embedding = generate_embedding(user_id, text)
             if embedding:
-                _chroma_collection.add(
+                collection.add(
                     ids=[node_id],
                     embeddings=[embedding],
                     metadatas=[{"type": node_type, "created_at": now}],
@@ -189,7 +218,7 @@ def create_node(
         except Exception as e:
             logger.warning(f"[Knowledge] Embedding failed for {node_id}: {e}")
 
-    logger.debug(f"[Knowledge] Created {node_type} node: {node_id[:8]}")
+    logger.debug(f"[Knowledge] Created {node_type} node: {node_id[:8]} for user: {user_id}")
     return node_id
 
 
@@ -207,7 +236,7 @@ def _prepare_embedding_text(node_type: str, content: dict) -> str:
         return json.dumps(content)[:500]
 
 
-def get_node(node_id: str, update_access: bool = True) -> Optional[Dict]:
+def get_node(user_id: str, node_id: str, update_access: bool = True) -> Optional[Dict]:
     """
     Retrieve node by ID.
     update_access=False for internal reads that shouldn't count as user access.
@@ -216,7 +245,7 @@ def get_node(node_id: str, update_access: bool = True) -> Optional[Dict]:
 
     conn   = _get_conn()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM nodes WHERE id = ?", (node_id,))
+    cursor.execute("SELECT * FROM nodes WHERE id = ? AND user_id = ?", (node_id, user_id))
     row = cursor.fetchone()
 
     if not row:
@@ -227,12 +256,13 @@ def get_node(node_id: str, update_access: bool = True) -> Optional[Dict]:
         cursor.execute("""
             UPDATE nodes
             SET last_accessed = ?, access_count = access_count + 1
-            WHERE id = ?
-        """, (now, node_id))
+            WHERE id = ? AND user_id = ?
+        """, (now, node_id, user_id))
         conn.commit()
 
     return {
         "id":              row["id"],
+        "user_id":         row["user_id"],
         "type":            row["type"],
         "content":         json.loads(row["content"]),
         "metadata":        json.loads(row["metadata"]),
@@ -244,7 +274,7 @@ def get_node(node_id: str, update_access: bool = True) -> Optional[Dict]:
     }
 
 
-def update_node(node_id: str, updates: dict) -> bool:
+def update_node(user_id: str, node_id: str, updates: dict) -> bool:
     _require_init()
 
     conn   = _get_conn()
@@ -260,24 +290,24 @@ def update_node(node_id: str, updates: dict) -> bool:
     if not set_clauses:
         return False
 
-    values.append(node_id)
+    values.extend([node_id, user_id])
     cursor.execute(
-        f"UPDATE nodes SET {', '.join(set_clauses)} WHERE id = ?",
+        f"UPDATE nodes SET {', '.join(set_clauses)} WHERE id = ? AND user_id = ?",
         values
     )
     conn.commit()
     return cursor.rowcount > 0
 
 
-def get_nodes_by_type(node_type: str, status: str = "active") -> List[Dict]:
+def get_nodes_by_type(user_id: str, node_type: str, status: str = "active") -> List[Dict]:
     """Public function — no direct _local access from outside this module."""
     _require_init()
 
     conn   = _get_conn()
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT * FROM nodes WHERE type = ? AND status = ?",
-        (node_type, status)
+        "SELECT * FROM nodes WHERE type = ? AND status = ? AND user_id = ?",
+        (node_type, status, user_id)
     )
     rows = cursor.fetchall()
     return [
@@ -298,6 +328,7 @@ def get_nodes_by_type(node_type: str, status: str = "active") -> List[Dict]:
 # ═══════════════════════════════════════════════════
 
 def create_edge(
+    user_id:   str,
     from_node: str,
     to_node:   str,
     edge_type: str,
@@ -318,9 +349,9 @@ def create_edge(
     try:
         cursor.execute("""
             INSERT OR IGNORE INTO edges
-                (id, from_node, to_node, edge_type, strength, reason, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (edge_id, from_node, to_node, edge_type, strength, reason, now))
+                (id, user_id, from_node, to_node, edge_type, strength, reason, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (edge_id, user_id, from_node, to_node, edge_type, strength, reason, now))
         conn.commit()
         return edge_id if cursor.rowcount > 0 else None
     except Exception as e:
@@ -329,6 +360,7 @@ def create_edge(
 
 
 def get_node_edges(
+    user_id:   str,
     node_id:   str,
     direction: str = "both",
     edge_type: str = None
@@ -344,14 +376,14 @@ def get_node_edges(
     cursor = conn.cursor()
 
     if direction == "outgoing":
-        base = "SELECT * FROM edges WHERE from_node = ?"
-        params = [node_id]
+        base = "SELECT * FROM edges WHERE from_node = ? AND user_id = ?"
+        params = [node_id, user_id]
     elif direction == "incoming":
-        base = "SELECT * FROM edges WHERE to_node = ?"
-        params = [node_id]
+        base = "SELECT * FROM edges WHERE to_node = ? AND user_id = ?"
+        params = [node_id, user_id]
     else:
-        base = "SELECT * FROM edges WHERE from_node = ? OR to_node = ?"
-        params = [node_id, node_id]
+        base = "SELECT * FROM edges WHERE (from_node = ? OR to_node = ?) AND user_id = ?"
+        params = [node_id, node_id, user_id]
 
     if edge_type:
         base += " AND edge_type = ?"
@@ -366,6 +398,7 @@ def get_node_edges(
 # ═══════════════════════════════════════════════════
 
 def semantic_search(
+    user_id:        str,
     query:          str,
     top_k:          int       = 5,
     node_types:     List[str] = None,
@@ -379,13 +412,14 @@ def semantic_search(
       1.0 = completely opposite
     So similarity = 1 - distance (both in [0,1]).
     """
-    if _chroma_collection is None:
+    collection = _get_user_collection(user_id)
+    if collection is None:
         logger.debug("[Knowledge] Vector search unavailable — ChromaDB not initialized")
         return []
 
     try:
         from llm import generate_query_embedding
-        query_embedding = generate_query_embedding(query)
+        query_embedding = generate_query_embedding(user_id, query)
     except Exception as e:
         logger.warning(f"[Knowledge] Query embedding failed: {e}")
         return []
@@ -396,9 +430,9 @@ def semantic_search(
     where = {"type": {"$in": node_types}} if node_types else None
 
     try:
-        results = _chroma_collection.query(
+        results = collection.query(
             query_embeddings=[query_embedding],
-            n_results=min(top_k, max(1, _chroma_collection.count())),
+            n_results=min(top_k, max(1, collection.count())),
             where=where
         )
     except Exception as e:
@@ -417,7 +451,7 @@ def semantic_search(
         if similarity < min_similarity:
             continue
 
-        node = get_node(node_id, update_access=False)
+        node = get_node(user_id, node_id, update_access=False)
         if node:
             node["relevance"] = round(similarity, 4)
             enriched.append(node)
@@ -430,9 +464,10 @@ def semantic_search(
 # DUPLICATE DETECTION
 # ═══════════════════════════════════════════════════
 
-def check_duplicate(goal_text: str, threshold: float = 0.85) -> Optional[Dict]:
+def check_duplicate(user_id: str, goal_text: str, threshold: float = 0.85) -> Optional[Dict]:
     """Returns match info if a very similar goal exists, else None."""
     similar = semantic_search(
+        user_id=user_id,
         query=goal_text,
         top_k=3,
         node_types=["goal"],
@@ -451,9 +486,10 @@ def check_duplicate(goal_text: str, threshold: float = 0.85) -> Optional[Dict]:
 # CONTEXT RETRIEVAL FOR PIPELINE
 # ═══════════════════════════════════════════════════
 
-def get_relevant_context(user_input: str, top_k: int = 3) -> List[Dict]:
+def get_relevant_context(user_id: str, user_input: str, top_k: int = 3) -> List[Dict]:
     """Main retrieval function used by the pipeline."""
     results = semantic_search(
+        user_id=user_id,
         query=user_input,
         top_k=top_k,
         min_similarity=0.75
@@ -471,7 +507,7 @@ def get_relevant_context(user_input: str, top_k: int = 3) -> List[Dict]:
 # ARCHIVING
 # ═══════════════════════════════════════════════════
 
-def archive_old_nodes(days_threshold: int = 30) -> int:
+def archive_old_nodes(user_id: str, days_threshold: int = 30) -> int:
     _require_init()
 
     cutoff = (datetime.utcnow() - timedelta(days=days_threshold)).isoformat()
@@ -480,11 +516,11 @@ def archive_old_nodes(days_threshold: int = 30) -> int:
     cursor.execute("""
         UPDATE nodes
         SET status = 'archived'
-        WHERE last_accessed < ? AND access_count < 2 AND status = 'active'
-    """, (cutoff,))
+        WHERE last_accessed < ? AND access_count < 2 AND status = 'active' AND user_id = ?
+    """, (cutoff, user_id))
     conn.commit()
     archived = cursor.rowcount
-    logger.info(f"[Knowledge] Archived {archived} old nodes")
+    logger.info(f"[Knowledge] Archived {archived} old nodes for {user_id}")
     return archived
 
 
@@ -492,28 +528,29 @@ def archive_old_nodes(days_threshold: int = 30) -> int:
 # STATISTICS
 # ═══════════════════════════════════════════════════
 
-def get_stats() -> Dict:
+def get_stats(user_id: str) -> Dict:
     _require_init()
 
     conn   = _get_conn()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT type, COUNT(*) as count FROM nodes WHERE status = 'active' GROUP BY type")
+    cursor.execute("SELECT type, COUNT(*) as count FROM nodes WHERE status = 'active' AND user_id = ? GROUP BY type", (user_id,))
     type_counts = {row["type"]: row["count"] for row in cursor.fetchall()}
 
-    cursor.execute("SELECT COUNT(*) as total FROM nodes WHERE status = 'active'")
+    cursor.execute("SELECT COUNT(*) as total FROM nodes WHERE status = 'active' AND user_id = ?", (user_id,))
     total_nodes = cursor.fetchone()["total"]
 
-    cursor.execute("SELECT COUNT(*) as total FROM edges")
+    cursor.execute("SELECT COUNT(*) as total FROM edges WHERE user_id = ?", (user_id,))
     total_edges = cursor.fetchone()["total"]
 
-    cursor.execute("SELECT COUNT(*) as total FROM nodes WHERE status = 'archived'")
+    cursor.execute("SELECT COUNT(*) as total FROM nodes WHERE status = 'archived' AND user_id = ?", (user_id,))
     archived = cursor.fetchone()["total"]
 
     vector_count = 0
-    if _chroma_collection:
+    collection = _get_user_collection(user_id)
+    if collection:
         try:
-            vector_count = _chroma_collection.count()
+            vector_count = collection.count()
         except Exception:
             pass
 
@@ -524,3 +561,4 @@ def get_stats() -> Dict:
         "nodes_by_type": type_counts,
         "vector_count":  vector_count,
     }
+
