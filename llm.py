@@ -287,7 +287,7 @@ def safe_json_parse(raw: str) -> dict:
 # COHERE IMPLEMENTATION
 # ═══════════════════════════════════════════════════
 
-def _call_cohere(prompt: str, model: str, temperature: float,
+def _call_cohere(user_id: str, prompt: str, model: str, temperature: float,
                  preamble: Optional[str] = None) -> str:
     client = _init_cohere()
     kwargs = {
@@ -299,6 +299,25 @@ def _call_cohere(prompt: str, model: str, temperature: float,
     if preamble:
         kwargs["preamble"] = preamble
     response = client.chat(**kwargs)
+    
+    # Track usage
+    try:
+        import subscription_manager as sm
+        if hasattr(response, 'meta') and hasattr(response.meta, 'billed_units'):
+            tokens = 0
+            if response.meta.billed_units:
+                if hasattr(response.meta.billed_units, 'input_tokens') and response.meta.billed_units.input_tokens:
+                    tokens += response.meta.billed_units.input_tokens
+                if hasattr(response.meta.billed_units, 'output_tokens') and response.meta.billed_units.output_tokens:
+                    tokens += response.meta.billed_units.output_tokens
+            if tokens == 0:
+                tokens = (len(prompt) + len(response.text)) // 4
+        else:
+            tokens = (len(prompt) + len(response.text)) // 4
+        sm.record_usage(user_id, tokens)
+    except Exception as e:
+        logger.warning(f"[LLM] Failed to record usage: {e}")
+        
     return response.text.strip()
 
 
@@ -306,7 +325,7 @@ def _call_cohere(prompt: str, model: str, temperature: float,
 # UNIVERSAL LLM CALLER
 # ═══════════════════════════════════════════════════
 
-def call_llm(role: str, prompt: str, retries: int = 2,
+def call_llm(user_id: str, role: str, prompt: str, retries: int = 2,
              role_preamble: Optional[str] = None) -> str:
     config     = MODEL_ROUTING.get(role, MODEL_ROUTING["architect"])
     model_key  = config["model_key"]
@@ -316,7 +335,7 @@ def call_llm(role: str, prompt: str, retries: int = 2,
     last_error = None
     for attempt in range(retries + 1):
         try:
-            raw = _call_cohere(prompt, model_name, temp, preamble=role_preamble)
+            raw = _call_cohere(user_id, prompt, model_name, temp, preamble=role_preamble)
             if role not in PROSE_ROLES:
                 return clean_json(raw)
             return raw
@@ -335,24 +354,50 @@ def call_llm(role: str, prompt: str, retries: int = 2,
 # EMBEDDINGS
 # ═══════════════════════════════════════════════════
 
-def generate_embedding(text: str) -> list:
+def generate_embedding(user_id: str, text: str) -> list:
     try:
         client   = _init_cohere()
         response = client.embed(
             texts=[text], model="embed-english-v3.0", input_type="search_document"
         )
+        try:
+            import subscription_manager as sm
+            if hasattr(response, 'meta') and hasattr(response.meta, 'billed_units'):
+                tokens = 0
+                if response.meta.billed_units and hasattr(response.meta.billed_units, 'input_tokens') and response.meta.billed_units.input_tokens:
+                    tokens = response.meta.billed_units.input_tokens
+                if tokens == 0:
+                    tokens = len(text) // 4
+            else:
+                tokens = len(text) // 4
+            sm.record_usage(user_id, tokens)
+        except Exception:
+            pass
         return response.embeddings[0]
     except Exception as e:
         logger.warning(f"[EMBEDDING] Failed: {e}")
         return []
 
 
-def generate_query_embedding(text: str) -> list:
+def generate_query_embedding(user_id: str, text: str) -> list:
     try:
         client   = _init_cohere()
         response = client.embed(
             texts=[text], model="embed-english-v3.0", input_type="search_query"
         )
+        try:
+            import subscription_manager as sm
+            if hasattr(response, 'meta') and hasattr(response.meta, 'billed_units'):
+                tokens = 0
+                if response.meta.billed_units and hasattr(response.meta.billed_units, 'input_tokens') and response.meta.billed_units.input_tokens:
+                    tokens = response.meta.billed_units.input_tokens
+                if tokens == 0:
+                    tokens = len(text) // 4
+            else:
+                tokens = len(text) // 4
+            sm.record_usage(user_id, tokens)
+        except Exception:
+            pass
         return response.embeddings[0]
     except Exception as e:
         logger.warning(f"[QUERY_EMBEDDING] Failed: {e}")
@@ -363,44 +408,44 @@ def generate_query_embedding(text: str) -> list:
 # AGENT WRAPPERS — 14 agents
 # ═══════════════════════════════════════════════════
 
-def call_router(prompt: str, role_preamble: Optional[str] = None) -> str:
-    return call_llm("router", prompt, role_preamble=role_preamble)
+def call_router(user_id: str, prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm(user_id, "router", prompt, role_preamble=role_preamble)
 
-def call_clarifier(prompt: str, role_preamble: Optional[str] = None) -> str:
-    return call_llm("clarifier", prompt, role_preamble=role_preamble)
+def call_clarifier(user_id: str, prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm(user_id, "clarifier", prompt, role_preamble=role_preamble)
 
-def call_extractor(prompt: str, role_preamble: Optional[str] = None) -> str:
-    return call_llm("extractor", prompt, role_preamble=role_preamble)
+def call_extractor(user_id: str, prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm(user_id, "extractor", prompt, role_preamble=role_preamble)
 
-def call_architect(prompt: str, role_preamble: Optional[str] = None) -> str:
-    return call_llm("architect", prompt, role_preamble=role_preamble)
+def call_architect(user_id: str, prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm(user_id, "architect", prompt, role_preamble=role_preamble)
 
-def call_critic(prompt: str, role_preamble: Optional[str] = None) -> str:
-    return call_llm("critic", prompt, role_preamble=role_preamble)
+def call_critic(user_id: str, prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm(user_id, "critic", prompt, role_preamble=role_preamble)
 
-def call_operator(prompt: str, role_preamble: Optional[str] = None) -> str:
-    return call_llm("operator", prompt, role_preamble=role_preamble)
+def call_operator(user_id: str, prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm(user_id, "operator", prompt, role_preamble=role_preamble)
 
-def call_auditor(prompt: str, role_preamble: Optional[str] = None) -> str:
-    return call_llm("auditor", prompt, role_preamble=role_preamble)
+def call_auditor(user_id: str, prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm(user_id, "auditor", prompt, role_preamble=role_preamble)
 
-def call_validator(prompt: str, role_preamble: Optional[str] = None) -> str:
-    return call_llm("validator", prompt, role_preamble=role_preamble)
+def call_validator(user_id: str, prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm(user_id, "validator", prompt, role_preamble=role_preamble)
 
-def call_compiler(prompt: str, role_preamble: Optional[str] = None) -> str:
-    return call_llm("compiler", prompt, role_preamble=role_preamble)
+def call_compiler(user_id: str, prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm(user_id, "compiler", prompt, role_preamble=role_preamble)
 
-def call_qa(prompt: str, role_preamble: Optional[str] = None) -> str:
-    return call_llm("qa", prompt, role_preamble=role_preamble)
+def call_qa(user_id: str, prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm(user_id, "qa", prompt, role_preamble=role_preamble)
 
-def call_knowledge_retriever(prompt: str, role_preamble: Optional[str] = None) -> str:
-    return call_llm("knowledge_retriever", prompt, role_preamble=role_preamble)
+def call_knowledge_retriever(user_id: str, prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm(user_id, "knowledge_retriever", prompt, role_preamble=role_preamble)
 
-def call_knowledge_linker(prompt: str, role_preamble: Optional[str] = None) -> str:
-    return call_llm("knowledge_linker", prompt, role_preamble=role_preamble)
+def call_knowledge_linker(user_id: str, prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm(user_id, "knowledge_linker", prompt, role_preamble=role_preamble)
 
-def call_insight_generator(prompt: str, role_preamble: Optional[str] = None) -> str:
-    return call_llm("insight_generator", prompt, role_preamble=role_preamble)
+def call_insight_generator(user_id: str, prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm(user_id, "insight_generator", prompt, role_preamble=role_preamble)
 
-def call_deduplicator(prompt: str, role_preamble: Optional[str] = None) -> str:
-    return call_llm("deduplicator", prompt, role_preamble=role_preamble)
+def call_deduplicator(user_id: str, prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm(user_id, "deduplicator", prompt, role_preamble=role_preamble)
