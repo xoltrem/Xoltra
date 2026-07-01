@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # AUTO-LINKING ENGINE
 # ═══════════════════════════════════════════════════
 
-def auto_link_node(node_id: str, node_data: Dict):
+def auto_link_node(user_id: str, node_id: str, node_data: Dict):
     """
     Automatically create edges when a new node is created.
     Runs semantic search to find related nodes, then creates edges.
@@ -37,6 +37,7 @@ def auto_link_node(node_id: str, node_data: Dict):
     # Semantic linking — find similar nodes
     embedding_text = kdb._prepare_embedding_text(node_type, content)
     similar_nodes  = kdb.semantic_search(
+        user_id=user_id,
         query=embedding_text,
         top_k=5,
         min_similarity=0.75
@@ -47,6 +48,7 @@ def auto_link_node(node_id: str, node_data: Dict):
             continue
 
         kdb.create_edge(
+            user_id=user_id,
             from_node=node_id,
             to_node=similar["id"],
             edge_type="relates_to",
@@ -57,18 +59,19 @@ def auto_link_node(node_id: str, node_data: Dict):
 
     # Type-specific linking
     if node_type == "workflow":
-        _link_workflow(node_id, content)
+        _link_workflow(user_id, node_id, content)
     elif node_type == "document":
-        _link_document(node_id, content)
+        _link_document(user_id, node_id, content)
 
 
-def _link_workflow(workflow_id: str, content: Dict):
+def _link_workflow(user_id: str, workflow_id: str, content: Dict):
     """Link workflow to semantically related goals."""
     goal_summary = content.get("goal_summary", "")
     if not goal_summary:
         return
 
     goals = kdb.semantic_search(
+        user_id=user_id,
         query=goal_summary,
         top_k=3,
         node_types=["goal"],
@@ -76,6 +79,7 @@ def _link_workflow(workflow_id: str, content: Dict):
     )
     for goal in goals:
         kdb.create_edge(
+            user_id=user_id,
             from_node=workflow_id,
             to_node=goal["id"],
             edge_type="derives_from",
@@ -84,13 +88,14 @@ def _link_workflow(workflow_id: str, content: Dict):
         )
 
 
-def _link_document(doc_id: str, content: Dict):
+def _link_document(user_id: str, doc_id: str, content: Dict):
     """Link document to related goals."""
     extracted_goal = content.get("extracted_goal", "")
     if not extracted_goal:
         return
 
     related_goals = kdb.semantic_search(
+        user_id=user_id,
         query=extracted_goal,
         top_k=3,
         node_types=["goal"],
@@ -98,6 +103,7 @@ def _link_document(doc_id: str, content: Dict):
     )
     for goal in related_goals:
         kdb.create_edge(
+            user_id=user_id,
             from_node=doc_id,
             to_node=goal["id"],
             edge_type="relates_to",
@@ -110,17 +116,17 @@ def _link_document(doc_id: str, content: Dict):
 # INSIGHT GENERATION
 # ═══════════════════════════════════════════════════
 
-def generate_insights() -> List[Dict]:
+def generate_insights(user_id: str) -> List[Dict]:
     """
     Analyze patterns across stored goals and generate insights.
     Called every 10 new nodes by the pipeline.
     Uses get_nodes_by_type() — never accesses _sqlite_conn directly.
     """
-    stats = kdb.get_stats()
+    stats = kdb.get_stats(user_id)
     if stats["total_nodes"] < 5:
         return []
 
-    goals = kdb.get_nodes_by_type("goal", status="active")
+    goals = kdb.get_nodes_by_type(user_id, "goal", status="active")
     if len(goals) < 3:
         return []
 
@@ -157,7 +163,7 @@ Only describe patterns you observed.
 """
 
     try:
-        raw      = call_insight_generator(prompt)
+        raw      = call_insight_generator(user_id, prompt)
         # Insight generator is a PROSE_ROLE but we need JSON here
         # Use safe_json_parse directly
         from llm import safe_json_parse, clean_json
@@ -170,6 +176,7 @@ Only describe patterns you observed.
                 continue
 
             insight_id = kdb.create_node(
+                user_id=user_id,
                 node_type="insight",
                 content={
                     "pattern":    pattern["pattern"],
@@ -179,7 +186,7 @@ Only describe patterns you observed.
             )
             stored.append(pattern)
 
-        logger.info(f"[Knowledge] Generated {len(stored)} insights")
+        logger.info(f"[Knowledge] Generated {len(stored)} insights for {user_id}")
         return stored
 
     except Exception as e:
@@ -191,12 +198,12 @@ Only describe patterns you observed.
 # DEDUPLICATION
 # ═══════════════════════════════════════════════════
 
-def check_before_create(goal_text: str) -> Dict:
+def check_before_create(user_id: str, goal_text: str) -> Dict:
     """
     Check if goal already exists. Returns action recommendation.
     Actions: create_new | reuse | evolve
     """
-    dup = kdb.check_duplicate(goal_text, threshold=0.85)
+    dup = kdb.check_duplicate(user_id, goal_text, threshold=0.85)
 
     if not dup:
         return {"action": "create_new", "reason": "No similar goals found"}
@@ -226,12 +233,12 @@ def check_before_create(goal_text: str) -> Dict:
 # CONTEXT RETRIEVAL FOR PIPELINE
 # ═══════════════════════════════════════════════════
 
-def get_context_for_pipeline(user_input: str) -> Optional[List[Dict]]:
+def get_context_for_pipeline(user_id: str, user_input: str) -> Optional[List[Dict]]:
     """
     Called by pipeline to get relevant context for prompt injection.
     Returns formatted list for LLM consumption or None if nothing relevant.
     """
-    relevant = kdb.get_relevant_context(user_input, top_k=3)
+    relevant = kdb.get_relevant_context(user_id, user_input, top_k=3)
     if not relevant:
         return None
 
