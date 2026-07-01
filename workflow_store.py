@@ -60,6 +60,7 @@ def init_workflow_tables():
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS workflows (
         id          TEXT PRIMARY KEY,
+        user_id     TEXT NOT NULL DEFAULT 'default',
         name        TEXT NOT NULL,
         status      TEXT NOT NULL DEFAULT 'draft',
         graph       TEXT NOT NULL DEFAULT '{"nodes":[],"edges":[]}',
@@ -67,8 +68,11 @@ def init_workflow_tables():
         updated_at  TEXT NOT NULL
     )
     """)
+    
+    kdb._add_column_if_not_exists(cursor, "workflows", "user_id", "TEXT NOT NULL DEFAULT 'default'")
 
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_workflows_status ON workflows(status)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_workflows_user ON workflows(user_id)")
     conn.commit()
     _tables_created = True
     logger.info("[WorkflowStore] Tables initialized")
@@ -78,7 +82,7 @@ def init_workflow_tables():
 # CRUD
 # ═══════════════════════════════════════════════════
 
-def save_workflow(workflow: dict) -> str:
+def save_workflow(user_id: str, workflow: dict) -> str:
     """
     Upsert a workflow definition. Returns workflow_id.
 
@@ -106,8 +110,8 @@ def save_workflow(workflow: dict) -> str:
     conn   = kdb._get_conn()
     cursor = conn.cursor()
 
-    # Check if this workflow already exists
-    cursor.execute("SELECT id, created_at FROM workflows WHERE id = ?", (workflow_id,))
+    # Check if this workflow already exists for this user
+    cursor.execute("SELECT id, created_at FROM workflows WHERE id = ? AND user_id = ?", (workflow_id, user_id))
     existing = cursor.fetchone()
 
     if existing:
@@ -115,23 +119,23 @@ def save_workflow(workflow: dict) -> str:
         cursor.execute("""
             UPDATE workflows
             SET name = ?, status = ?, graph = ?, updated_at = ?
-            WHERE id = ?
-        """, (name, status, json.dumps(graph), now, workflow_id))
-        logger.debug(f"[WorkflowStore] Updated workflow: {workflow_id[:8]}")
+            WHERE id = ? AND user_id = ?
+        """, (name, status, json.dumps(graph), now, workflow_id, user_id))
+        logger.debug(f"[WorkflowStore] Updated workflow: {workflow_id[:8]} for user: {user_id}")
     else:
         # Insert
         created_at = workflow.get("created_at", now)
         cursor.execute("""
-            INSERT INTO workflows (id, name, status, graph, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (workflow_id, name, status, json.dumps(graph), created_at, now))
-        logger.debug(f"[WorkflowStore] Created workflow: {workflow_id[:8]}")
+            INSERT INTO workflows (id, user_id, name, status, graph, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (workflow_id, user_id, name, status, json.dumps(graph), created_at, now))
+        logger.debug(f"[WorkflowStore] Created workflow: {workflow_id[:8]} for user: {user_id}")
 
     conn.commit()
     return workflow_id
 
 
-def get_workflow(workflow_id: str) -> Optional[Dict]:
+def get_workflow(user_id: str, workflow_id: str) -> Optional[Dict]:
     """
     Retrieve a single workflow by ID.
     Returns None if not found.
@@ -140,7 +144,7 @@ def get_workflow(workflow_id: str) -> Optional[Dict]:
 
     conn   = kdb._get_conn()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM workflows WHERE id = ?", (workflow_id,))
+    cursor.execute("SELECT * FROM workflows WHERE id = ? AND user_id = ?", (workflow_id, user_id))
     row = cursor.fetchone()
 
     if not row:
@@ -149,9 +153,9 @@ def get_workflow(workflow_id: str) -> Optional[Dict]:
     return _row_to_dict(row)
 
 
-def list_workflows(status: str = None) -> List[Dict]:
+def list_workflows(user_id: str, status: str = None) -> List[Dict]:
     """
-    List all workflows, optionally filtered by status ('draft' or 'published').
+    List all workflows for a user, optionally filtered by status ('draft' or 'published').
     Returns newest-first.
     """
     init_workflow_tables()
@@ -163,40 +167,40 @@ def list_workflows(status: str = None) -> List[Dict]:
         if status not in ("draft", "published"):
             raise ValueError(f"Invalid status filter: '{status}'")
         cursor.execute(
-            "SELECT * FROM workflows WHERE status = ? ORDER BY updated_at DESC",
-            (status,)
+            "SELECT * FROM workflows WHERE user_id = ? AND status = ? ORDER BY updated_at DESC",
+            (user_id, status)
         )
     else:
-        cursor.execute("SELECT * FROM workflows ORDER BY updated_at DESC")
+        cursor.execute("SELECT * FROM workflows WHERE user_id = ? ORDER BY updated_at DESC", (user_id,))
 
     return [_row_to_dict(row) for row in cursor.fetchall()]
 
 
-def delete_workflow(workflow_id: str):
+def delete_workflow(user_id: str, workflow_id: str):
     """
     Hard-delete a workflow by ID.
-    Raises ValueError if the workflow does not exist.
+    Raises ValueError if the workflow does not exist or belongs to another user.
     """
     init_workflow_tables()
 
     conn   = kdb._get_conn()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM workflows WHERE id = ?", (workflow_id,))
+    cursor.execute("DELETE FROM workflows WHERE id = ? AND user_id = ?", (workflow_id, user_id))
     conn.commit()
 
     if cursor.rowcount == 0:
-        raise ValueError(f"Workflow not found: {workflow_id}")
+        raise ValueError(f"Workflow not found or access denied: {workflow_id}")
 
-    logger.info(f"[WorkflowStore] Deleted workflow: {workflow_id[:8]}")
+    logger.info(f"[WorkflowStore] Deleted workflow: {workflow_id[:8]} for user: {user_id}")
 
 
-def duplicate_workflow(workflow_id: str) -> str:
+def duplicate_workflow(user_id: str, workflow_id: str) -> str:
     """
     Deep-copy a workflow with a new ID and ' (Copy)' appended to the name.
     Returns the new workflow_id.
     Raises ValueError if the source workflow does not exist.
     """
-    source = get_workflow(workflow_id)
+    source = get_workflow(user_id, workflow_id)
     if not source:
         raise ValueError(f"Cannot duplicate — workflow not found: {workflow_id}")
 
@@ -205,7 +209,7 @@ def duplicate_workflow(workflow_id: str) -> str:
         "status": "draft",
         "graph":  source["graph"],
     }
-    return save_workflow(new_workflow)
+    return save_workflow(user_id, new_workflow)
 
 
 # ═══════════════════════════════════════════════════
@@ -216,6 +220,7 @@ def _row_to_dict(row) -> Dict:
     """Convert a sqlite3.Row to a clean dict with parsed JSON graph."""
     return {
         "id":         row["id"],
+        "user_id":    row["user_id"],
         "name":       row["name"],
         "status":     row["status"],
         "graph":      json.loads(row["graph"]),
