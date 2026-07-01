@@ -6,6 +6,7 @@ Every agent:
 - Parses its own JSON safely — never trusts raw LLM output
 - Raises on failure rather than returning garbage
 - Accepts role_preamble: str | None — passed to every LLM call
+- Requires user_id for multi-tenant data and token tracking
 
 Two modes:
   default — direct + detailed, leads with answers
@@ -34,9 +35,9 @@ logger = logging.getLogger(__name__)
 
 class RouterAgent:
 
-    def run(self, user_input: str,
+    def run(self, user_id: str, user_input: str,
             role_preamble: Optional[str] = None) -> dict:
-        raw = call_router(f"""
+        raw = call_router(user_id, f"""
 You are an intelligent request classifier for an AI execution system.
 
 Analyze the input and classify across four dimensions:
@@ -80,9 +81,9 @@ Input: {user_input}
 
 class ClarifierAgent:
 
-    def run(self, goal: str,
+    def run(self, user_id: str, goal: str,
             role_preamble: Optional[str] = None) -> dict:
-        raw = call_clarifier(f"""
+        raw = call_clarifier(user_id, f"""
 You are a strategic intake specialist generating clarifying questions before building an execution plan.
 
 Generate 3-5 questions that would significantly improve the plan.
@@ -112,9 +113,9 @@ Goal: {goal}
 
 class PDFExtractorAgent:
 
-    def run(self, raw_text: str,
+    def run(self, user_id: str, raw_text: str,
             role_preamble: Optional[str] = None) -> str:
-        return call_extractor(f"""
+        return call_extractor(user_id, f"""
 You are a precision document analyst.
 Convert raw document text into an actionable goal statement — 3-6 sentences.
 Frame it as if a human is describing their goal to a strategic advisor.
@@ -134,6 +135,7 @@ class ArchitectAgent:
 
     def run(
         self,
+        user_id: str,
         goal: str,
         context_nodes: Optional[List[Dict]] = None,
         role_preamble: Optional[str] = None
@@ -152,7 +154,7 @@ class ArchitectAgent:
                 )
             context_section += "\nUse these for inspiration. Build a fresh plan for the current goal.\n"
 
-        raw = call_architect(f"""
+        raw = call_architect(user_id, f"""
 You are a world-class strategic execution architect.
 Transform the goal into a structured execution blueprint.
 Output ONLY valid JSON — no preamble, no markdown, no text outside JSON.
@@ -198,9 +200,9 @@ Goal: {goal}
 
 class CriticAgent:
 
-    def run(self, blueprint: dict, original_goal: str,
+    def run(self, user_id: str, blueprint: dict, original_goal: str,
             role_preamble: Optional[str] = None) -> dict:
-        raw = call_critic(f"""
+        raw = call_critic(user_id, f"""
 Ruthless plan reviewer. Your job is to find every flaw.
 
 Check for:
@@ -233,12 +235,13 @@ class OperatorAgent:
 
     def run(
         self,
+        user_id: str,
         blueprint: dict,
         issues: List[str],
         original_goal: str,
         role_preamble: Optional[str] = None
     ) -> dict:
-        raw = call_operator(f"""
+        raw = call_operator(user_id, f"""
 Pragmatic fixer. Fix every issue listed precisely.
 
 Rules:
@@ -262,9 +265,9 @@ Draft Plan: {json.dumps(blueprint)}
 
 class AuditorAgent:
 
-    def run(self, blueprint: dict, original_goal: str,
+    def run(self, user_id: str, blueprint: dict, original_goal: str,
             role_preamble: Optional[str] = None) -> dict:
-        raw = call_auditor(f"""
+        raw = call_auditor(user_id, f"""
 Precision auditor. Sharpen without changing structure.
 
 Improve:
@@ -292,9 +295,9 @@ Plan: {json.dumps(blueprint)}
 
 class ValidatorAgent:
 
-    def run(self, blueprint: dict,
+    def run(self, user_id: str, blueprint: dict,
             role_preamble: Optional[str] = None) -> dict:
-        raw = call_validator(f"""
+        raw = call_validator(user_id, f"""
 Strict JSON schema validator. Binary — pass or fail only.
 
 Required fields:
@@ -324,6 +327,7 @@ class CompilerAgent:
 
     def run(
         self,
+        user_id: str,
         blueprint: dict,
         original_goal: str,
         mode: str = "default",
@@ -391,7 +395,7 @@ Each risk as a paragraph: what it is, why it happens, exact mitigation.
                     f"{relevance:.0%} relevant): {summary}...\n\n"
                 )
 
-        compiled = call_compiler(f"""
+        compiled = call_compiler(user_id, f"""
 You are an expert execution strategist and writer.
 
 {style}
@@ -417,6 +421,7 @@ class QAAgent:
 
     def run(
         self,
+        user_id: str,
         question: str,
         complexity: str = "medium",
         mode: str = "default",
@@ -430,7 +435,7 @@ class QAAgent:
         }.get(complexity, "2-3 paragraphs")
 
         if mode == "coach":
-            return call_qa(f"""
+            return call_qa(user_id, f"""
 You are a world-class coach. Help the user understand — never just give the answer.
 
 - Break down the key concepts they need
@@ -442,7 +447,7 @@ You are a world-class coach. Help the user understand — never just give the an
 Question: {question}
 """, role_preamble=role_preamble)
         else:
-            return call_qa(f"""
+            return call_qa(user_id, f"""
 You are a direct, expert responder. Two qualities combined: direct AND detailed.
 
 - Lead with the answer immediately — no preamble
@@ -463,9 +468,9 @@ Question: {question}
 
 class KnowledgeLinkerAgent:
 
-    def run(self, source_node: dict, candidate_nodes: list,
+    def run(self, user_id: str, source_node: dict, candidate_nodes: list,
             role_preamble: Optional[str] = None) -> dict:
-        raw = call_knowledge_linker(f"""
+        raw = call_knowledge_linker(user_id, f"""
 You are a knowledge graph relationship expert.
 
 Analyze if these nodes should be linked and how.
@@ -501,9 +506,9 @@ Return ONLY JSON:
 
 class DeduplicatorAgent:
 
-    def run(self, goal: str, similar_goals: list,
+    def run(self, user_id: str, goal: str, similar_goals: list,
             role_preamble: Optional[str] = None) -> dict:
-        raw = call_deduplicator(f"""
+        raw = call_deduplicator(user_id, f"""
 You are a duplication detection specialist.
 
 Analyze if this new goal is essentially the same as existing goals.
