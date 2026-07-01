@@ -21,9 +21,9 @@ Architecture:
 Run history is persisted to SQLite alongside workflow definitions.
 
 Public API:
-    run_workflow(workflow_id, trigger_data)  → full run result dict
-    get_run(run_id)                          → single run result
-    list_runs(workflow_id)                   → run history for a workflow
+    run_workflow(user_id, workflow_id, trigger_data)  → full run result dict
+    get_run(user_id, run_id)                          → single run result
+    list_runs(user_id, workflow_id)                   → run history for a workflow
 """
 
 import json
@@ -53,6 +53,7 @@ class RunContext:
 
     Attributes:
         run_id          — unique identifier for this run
+        user_id         — tenant identifier
         workflow_id     — which workflow is being executed
         started_at      — ISO-8601 timestamp
         finished_at     — ISO-8601 timestamp (set when run completes)
@@ -62,8 +63,9 @@ class RunContext:
         trigger_data    — data passed in from the trigger
     """
 
-    def __init__(self, workflow_id: str, trigger_data: dict = None):
+    def __init__(self, user_id: str, workflow_id: str, trigger_data: dict = None):
         self.run_id       = str(uuid.uuid4())
+        self.user_id      = user_id
         self.workflow_id  = workflow_id
         self.started_at   = datetime.utcnow().isoformat()
         self.finished_at  = None
@@ -104,6 +106,7 @@ class RunContext:
     def to_dict(self) -> dict:
         return {
             "run_id":       self.run_id,
+            "user_id":      self.user_id,
             "workflow_id":  self.workflow_id,
             "started_at":   self.started_at,
             "finished_at":  self.finished_at,
@@ -131,6 +134,7 @@ def _init_runs_table():
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS workflow_runs (
         run_id       TEXT PRIMARY KEY,
+        user_id      TEXT NOT NULL DEFAULT 'default',
         workflow_id  TEXT NOT NULL,
         status       TEXT NOT NULL,
         started_at   TEXT NOT NULL,
@@ -139,8 +143,14 @@ def _init_runs_table():
         FOREIGN KEY (workflow_id) REFERENCES workflows(id)
     )
     """)
+    
+    kdb._add_column_if_not_exists(cursor, "workflow_runs", "user_id", "TEXT NOT NULL DEFAULT 'default'")
+
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_runs_workflow ON workflow_runs(workflow_id)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_runs_user ON workflow_runs(user_id)"
     )
     conn.commit()
     _runs_table_created = True
@@ -154,10 +164,11 @@ def _persist_run(ctx: RunContext):
     cursor = conn.cursor()
     cursor.execute("""
         INSERT OR REPLACE INTO workflow_runs
-            (run_id, workflow_id, status, started_at, finished_at, result)
-        VALUES (?, ?, ?, ?, ?, ?)
+            (run_id, user_id, workflow_id, status, started_at, finished_at, result)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
     """, (
         ctx.run_id,
+        ctx.user_id,
         ctx.workflow_id,
         ctx.status,
         ctx.started_at,
@@ -288,6 +299,9 @@ def _assemble_inputs(
 
     # Inject run variables into inputs so nodes can reference them
     inputs["_variables"] = dict(ctx.variables)
+    
+    # Inject user_id into variables so node executors can access it if needed
+    inputs["_user_id"] = ctx.user_id
 
     return inputs
 
@@ -339,7 +353,7 @@ def _emit_toast(message: str, level: str = "info"):
 # MAIN ENGINE — run_workflow()
 # ═══════════════════════════════════════════════════
 
-def run_workflow(workflow_id: str, trigger_data: dict = None) -> dict:
+def run_workflow(user_id: str, workflow_id: str, trigger_data: dict = None) -> dict:
     """
     Execute a workflow end-to-end.
 
@@ -351,6 +365,7 @@ def run_workflow(workflow_id: str, trigger_data: dict = None) -> dict:
     6. Emit Unity bridge updates at each step
 
     Args:
+        user_id:      The tenant ID executing the workflow
         workflow_id:  The ID of the workflow to run
         trigger_data: Optional data from the trigger (webhook body, etc.)
 
@@ -360,10 +375,16 @@ def run_workflow(workflow_id: str, trigger_data: dict = None) -> dict:
     Raises:
         ValueError: If workflow not found or graph is invalid
     """
+    # Check permissions and limits via subscription manager (handled upstream mostly, but we can do it here too)
+    import subscription_manager as sm
+    can_run, msg = sm.can_execute(user_id)
+    if not can_run:
+        raise ValueError(f"Subscription error: {msg}")
+
     # Load workflow
-    workflow = workflow_store.get_workflow(workflow_id)
+    workflow = workflow_store.get_workflow(user_id, workflow_id)
     if not workflow:
-        raise ValueError(f"Workflow not found: {workflow_id}")
+        raise ValueError(f"Workflow not found or access denied: {workflow_id}")
 
     graph = workflow.get("graph", {})
     nodes = graph.get("nodes", [])
@@ -379,7 +400,7 @@ def run_workflow(workflow_id: str, trigger_data: dict = None) -> dict:
     exec_order = _topological_sort(nodes, edges)
 
     # Create run context
-    ctx = RunContext(workflow_id=workflow_id, trigger_data=trigger_data)
+    ctx = RunContext(user_id=user_id, workflow_id=workflow_id, trigger_data=trigger_data)
 
     # Initialize all nodes as pending
     for nid in exec_order:
@@ -477,6 +498,9 @@ def run_workflow(workflow_id: str, trigger_data: dict = None) -> dict:
 
     # Final persist
     _persist_run(ctx)
+    
+    # Record execution usage
+    sm.record_execution(user_id)
 
     # Final Unity notification
     if ctx.status == "success":
@@ -488,7 +512,7 @@ def run_workflow(workflow_id: str, trigger_data: dict = None) -> dict:
 
     logger.info(
         f"[Engine] Workflow run {ctx.run_id[:8]} finished: {ctx.status} "
-        f"({len(exec_order)} nodes)"
+        f"({len(exec_order)} nodes) for user: {user_id}"
     )
 
     return ctx.to_dict()
@@ -498,16 +522,16 @@ def run_workflow(workflow_id: str, trigger_data: dict = None) -> dict:
 # RUN RETRIEVAL
 # ═══════════════════════════════════════════════════
 
-def get_run(run_id: str) -> Optional[Dict]:
+def get_run(user_id: str, run_id: str) -> Optional[Dict]:
     """
     Retrieve a single run result by run_id.
-    Returns None if not found.
+    Returns None if not found or belongs to another user.
     """
     _init_runs_table()
 
     conn   = kdb._get_conn()
     cursor = conn.cursor()
-    cursor.execute("SELECT result FROM workflow_runs WHERE run_id = ?", (run_id,))
+    cursor.execute("SELECT result FROM workflow_runs WHERE run_id = ? AND user_id = ?", (run_id, user_id))
     row = cursor.fetchone()
 
     if not row:
@@ -516,7 +540,7 @@ def get_run(run_id: str) -> Optional[Dict]:
     return json.loads(row["result"])
 
 
-def list_runs(workflow_id: str) -> List[Dict]:
+def list_runs(user_id: str, workflow_id: str) -> List[Dict]:
     """
     List all runs for a workflow, newest first.
     Returns a summary for each run (not the full node_results).
@@ -527,8 +551,8 @@ def list_runs(workflow_id: str) -> List[Dict]:
     cursor = conn.cursor()
     cursor.execute(
         "SELECT run_id, status, started_at, finished_at FROM workflow_runs "
-        "WHERE workflow_id = ? ORDER BY started_at DESC",
-        (workflow_id,)
+        "WHERE workflow_id = ? AND user_id = ? ORDER BY started_at DESC",
+        (workflow_id, user_id)
     )
 
     runs = []
