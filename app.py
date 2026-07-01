@@ -32,9 +32,10 @@ CORS(app, origins=["http://localhost:3000", "http://localhost:5173"])
 # init_storage() is already called here — xke never calls it again
 # (ensure_knowledge_base_ready() is only for Streamlit sessions)
 kdb.init_storage()
-from simulation_routes import register_simulation_routes
 import unity_bridge
+from auth import auth_bp, require_auth, get_current_user_id
 
+app.register_blueprint(auth_bp)
 register_simulation_routes(app)
 unity_bridge.start_bridge()
 pipeline = get_pipeline()
@@ -56,9 +57,11 @@ def _ok(data: dict):
 # ═══════════════════════════════════════════════════
 
 @app.route("/api/health", methods=["GET"])
+@require_auth
 def health():
+    user_id = get_current_user_id()
     try:
-        stats = kdb.get_stats()
+        stats = kdb.get_stats(user_id)
         return _ok({"status": "ok", "knowledge_stats": stats})
     except Exception as e:
         return _err(f"Health check failed: {e}", 500)
@@ -96,11 +99,13 @@ def get_role_detail(role_id: str):
 # ═══════════════════════════════════════════════════
 
 @app.route("/api/clarify", methods=["POST"])
+@require_auth
 def clarify():
     """
     Step 1 of goal flow.
     Body: { "goal": "string", "role_id": "default" }
     """
+    user_id = get_current_user_id()
     body    = request.get_json(silent=True) or {}
     goal    = (body.get("goal") or "").strip()
     role_id = body.get("role_id", "default")
@@ -112,7 +117,7 @@ def clarify():
         role_id = "default"
 
     try:
-        result = pipeline.get_clarifications(goal, role_id=role_id)
+        result = pipeline.get_clarifications(user_id, goal, role_id=role_id)
         return _ok({
             "mode":      result.get("mode", "default"),
             "questions": result.get("questions", [])
@@ -123,11 +128,13 @@ def clarify():
 
 
 @app.route("/api/run", methods=["POST"])
+@require_auth
 def run_goal():
     """
     Step 2 of goal flow.
     Body: { "goal", "mode", "answers", "role_id" }
     """
+    user_id = get_current_user_id()
     body    = request.get_json(silent=True) or {}
     goal    = (body.get("goal") or "").strip()
     mode    = body.get("mode", "default")
@@ -142,7 +149,7 @@ def run_goal():
         role_id = "default"
 
     try:
-        result = pipeline.run(goal, mode=mode, answers=answers, role_id=role_id)
+        result = pipeline.run(user_id, goal, mode=mode, answers=answers, role_id=role_id)
         return _ok({
             "output":        result.get("output", ""),
             "output_parsed": result.get("output_parsed"),
@@ -163,8 +170,10 @@ def run_goal():
 # ═══════════════════════════════════════════════════
 
 @app.route("/api/run-document", methods=["POST"])
+@require_auth
 def run_document():
     """Body: { "text": "raw document text", "role_id": "default" }"""
+    user_id = get_current_user_id()
     body    = request.get_json(silent=True) or {}
     text    = (body.get("text") or "").strip()
     role_id = body.get("role_id", "default")
@@ -175,7 +184,7 @@ def run_document():
         role_id = "default"
 
     try:
-        result = pipeline.run_from_document(text, role_id=role_id)
+        result = pipeline.run_from_document(user_id, text, role_id=role_id)
         return _ok({
             "extracted_goal": result.get("extracted_goal", ""),
             "output":         result.get("output", ""),
@@ -192,8 +201,10 @@ def run_document():
 
 
 @app.route("/api/upload-document", methods=["POST"])
+@require_auth
 def upload_document():
     """Accepts a file upload (.txt, .md, .pdf) + optional role_id form field."""
+    user_id = get_current_user_id()
     if "file" not in request.files:
         return _err("No file provided")
 
@@ -223,7 +234,7 @@ def upload_document():
         if not raw_text.strip():
             return _err("Could not extract text from file")
 
-        result = pipeline.run_from_document(raw_text, role_id=role_id)
+        result = pipeline.run_from_document(user_id, raw_text, role_id=role_id)
         return _ok({
             "extracted_goal": result.get("extracted_goal", ""),
             "output":         result.get("output", ""),
@@ -244,8 +255,10 @@ def upload_document():
 # ═══════════════════════════════════════════════════
 
 @app.route("/api/qa", methods=["POST"])
+@require_auth
 def qa():
     """Body: { "question": "string", "role_id": "default" }"""
+    user_id  = get_current_user_id()
     body     = request.get_json(silent=True) or {}
     question = (body.get("question") or "").strip()
     role_id  = body.get("role_id", "default")
@@ -256,7 +269,7 @@ def qa():
         role_id = "default"
 
     try:
-        result = pipeline.run_adaptive(question, role_id=role_id)
+        result = pipeline.run_adaptive(user_id, question, role_id=role_id)
         return _ok({
             "output":  result.get("output", ""),
             "mode":    result.get("mode", "default"),
@@ -272,27 +285,33 @@ def qa():
 # ═══════════════════════════════════════════════════
 
 @app.route("/api/stats", methods=["GET"])
+@require_auth
 def stats():
+    user_id = get_current_user_id()
     try:
-        return _ok({"stats": kdb.get_stats()})
+        return _ok({"stats": kdb.get_stats(user_id)})
     except Exception as e:
         return _err(f"Stats failed: {e}", 500)
 
 
 @app.route("/api/knowledge/nodes", methods=["GET"])
+@require_auth
 def get_nodes():
+    user_id = get_current_user_id()
     node_type = request.args.get("type", "goal")
     try:
-        nodes = kdb.get_nodes_by_type(node_type)
+        nodes = kdb.get_nodes_by_type(user_id, node_type)
         return _ok({"nodes": nodes, "count": len(nodes)})
     except Exception as e:
         return _err(f"Failed to fetch nodes: {e}", 500)
 
 
 @app.route("/api/knowledge/nodes/<node_id>", methods=["GET"])
+@require_auth
 def get_node(node_id: str):
+    user_id = get_current_user_id()
     try:
-        node = kdb.get_node(node_id)
+        node = kdb.get_node(user_id, node_id)
         if not node:
             return _err("Node not found", 404)
         return _ok({"node": node})
@@ -307,32 +326,12 @@ def get_node(node_id: str):
 # ═══════════════════════════════════════════════════
 
 @app.route("/api/knowledge/compact", methods=["POST"])
+@require_auth
 def compact_session():
     """
     Feature 4 — Session Compaction.
-
-    Save a conversation history to the knowledge graph as a goal or insight node.
-    Call this when the user clicks "Save Session" in the React frontend.
-
-    Body:
-    {
-        "messages": [
-            {"role": "user",      "content": "..."},
-            {"role": "assistant", "content": "..."}
-        ],
-        "session_topic": "optional label string"
-    }
-
-    Response:
-    {
-        "success": true,
-        "node_id":   "uuid",
-        "node_type": "goal" | "insight",
-        "title":     "short title",
-        "summary":   "2-3 sentence summary",
-        "linked":    true
-    }
     """
+    user_id       = get_current_user_id()
     body          = request.get_json(silent=True) or {}
     messages      = body.get("messages", [])
     session_topic = (body.get("session_topic") or "").strip() or None
@@ -351,7 +350,7 @@ def compact_session():
             return _err(f"messages[{i}].content must be a string")
 
     try:
-        result = xke.compact_session(messages, session_topic=session_topic)
+        result = xke.compact_session(user_id, messages, session_topic=session_topic)
 
         if result is None:
             # Session was too short — not an error, just nothing to store
@@ -375,41 +374,12 @@ def compact_session():
 
 
 @app.route("/api/knowledge/context", methods=["POST"])
+@require_auth
 def get_knowledge_context():
     """
     Feature 5 — Pattern-Aware Context.
-
-    Retrieve knowledge graph context for a user message.
-    The React frontend calls this before rendering a response so it can
-    display "what context was used" in the UI, or pass it back with
-    subsequent API calls for transparency.
-
-    The actual prompt enrichment happens server-side inside the pipeline
-    via knowledge_agent.get_context_for_pipeline(). This endpoint exposes
-    the same retrieval logic for the frontend's awareness panel.
-
-    Body:
-    {
-        "message": "the user's current message",
-        "mode":    "fast" | "thinking"   (default: "fast")
-    }
-
-    Response:
-    {
-        "success": true,
-        "mode":    "fast" | "thinking",
-        "nodes": [
-            {
-                "type":          "goal" | "workflow" | "insight" | ...,
-                "summary":       "short human-readable summary",
-                "relevance":     0.87,
-                "context_layer": "primary" | "neighbour" | "insight",
-                "created_at":    "2025-01-01T00:00:00"
-            }
-        ],
-        "count": 3
-    }
     """
+    user_id = get_current_user_id()
     body    = request.get_json(silent=True) or {}
     message = (body.get("message") or "").strip()
     mode    = body.get("mode", "fast")
@@ -420,7 +390,7 @@ def get_knowledge_context():
         return _err("mode must be 'fast' or 'thinking'")
 
     try:
-        raw_nodes = xke.get_context_by_mode(message, mode=mode)
+        raw_nodes = xke.get_context_by_mode(user_id, message, mode=mode)
 
         # Shape each node for the frontend — no raw content blobs
         shaped = []
