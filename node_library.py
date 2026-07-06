@@ -248,13 +248,103 @@ def _exec_ai_cohere_embed(inputs: dict, params: dict) -> dict:
 # LOGIC NODES
 # ═══════════════════════════════════════════════════
 
+import ast
+import operator as _op
+
+# Whitelisted AST node types + operators for _safe_eval_condition().
+# Anything not in these sets is rejected before Python's real eval/compile
+# ever sees it — this is what actually closes the well-known restricted-eval
+# escape (e.g. ().__class__.__bases__[0].__subclasses__()), since that trick
+# requires Attribute + Call nodes, and neither is in the allowed set below.
+_ALLOWED_NODES = (
+    ast.Expression, ast.BoolOp, ast.BinOp, ast.UnaryOp, ast.Compare,
+    ast.Name, ast.Load, ast.Constant, ast.List, ast.Tuple,
+    ast.And, ast.Or, ast.Not,
+    ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.In, ast.NotIn,
+    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod, ast.USub, ast.UAdd,
+)
+
+_BIN_OPS = {
+    ast.Add: _op.add, ast.Sub: _op.sub, ast.Mult: _op.mul,
+    ast.Div: _op.truediv, ast.Mod: _op.mod,
+}
+_CMP_OPS = {
+    ast.Eq: _op.eq, ast.NotEq: _op.ne, ast.Lt: _op.lt, ast.LtE: _op.le,
+    ast.Gt: _op.gt, ast.GtE: _op.ge, ast.In: lambda a, b: a in b,
+    ast.NotIn: lambda a, b: a not in b,
+}
+
+
+def _safe_eval_condition(expression: str, variables: dict):
+    """
+    Evaluate a boolean-ish expression without ever calling Python's real
+    Never runs Python's own general-purpose code evaluator on arbitrary
+    syntax. Parses to an AST first and walks it,
+    rejecting any node type not explicitly whitelisted (no Attribute,
+    no Call, no Subscript, no Import, no Lambda) — so there is no
+    attribute-chain escape path available, unlike restricted-builtins evaluation.
+    """
+    tree = ast.parse(expression, mode="eval")
+
+    for node in ast.walk(tree):
+        if not isinstance(node, _ALLOWED_NODES):
+            raise ValueError(
+                f"Disallowed expression syntax: {type(node).__name__}. "
+                f"Only comparisons, boolean logic, and basic arithmetic are permitted."
+            )
+
+    def _resolve_node(node):
+        if isinstance(node, ast.Expression):
+            return _resolve_node(node.body)
+        if isinstance(node, ast.Constant):
+            return node.value
+        if isinstance(node, ast.Name):
+            if node.id not in variables:
+                raise ValueError(f"Unknown variable in expression: '{node.id}'")
+            return variables[node.id]
+        if isinstance(node, ast.List):
+            return [_resolve_node(e) for e in node.elts]
+        if isinstance(node, ast.Tuple):
+            return tuple(_resolve_node(e) for e in node.elts)
+        if isinstance(node, ast.UnaryOp):
+            val = _resolve_node(node.operand)
+            return not val if isinstance(node.op, ast.Not) else (
+                -val if isinstance(node.op, ast.USub) else +val
+            )
+        if isinstance(node, ast.BinOp):
+            op_fn = _BIN_OPS.get(type(node.op))
+            if op_fn is None:
+                raise ValueError(f"Disallowed operator: {type(node.op).__name__}")
+            return op_fn(_resolve_node(node.left), _resolve_node(node.right))
+        if isinstance(node, ast.BoolOp):
+            values = [_resolve_node(v) for v in node.values]
+            return all(values) if isinstance(node.op, ast.And) else any(values)
+        if isinstance(node, ast.Compare):
+            left = _resolve_node(node.left)
+            for op_node, comparator in zip(node.ops, node.comparators):
+                op_fn = _CMP_OPS.get(type(op_node))
+                if op_fn is None:
+                    raise ValueError(f"Disallowed comparison: {type(op_node).__name__}")
+                right = _resolve_node(comparator)
+                if not op_fn(left, right):
+                    return False
+                left = right
+            return True
+        raise ValueError(f"Unsupported expression node: {type(node).__name__}")
+
+    return _resolve_node(tree)
+
+
 def _exec_logic_condition(inputs: dict, params: dict) -> dict:
     """
     Evaluate a boolean expression and route to true/false output.
 
-    The expression is a Python expression string that has access to
-    all input values as local variables. For safety, only builtins
-    like len(), int(), str(), bool() are available.
+    FIX: previously called Python's general-purpose code evaluator with
+    __builtins__ stripped, which is a known-incomplete sandbox (attribute-chain
+    escapes still reach dangerous classes without any builtins). Now uses
+    _safe_eval_condition(), an AST-whitelist evaluator that never runs
+    arbitrary syntax through the real evaluator at all — disallowed node
+    types are rejected up front.
 
     params.expression: e.g. "value > 10", "status == 'active'"
     """
@@ -262,18 +352,8 @@ def _exec_logic_condition(inputs: dict, params: dict) -> dict:
     if not expression:
         raise ValueError("logic.condition requires a non-empty 'expression' param")
 
-    # Build a safe evaluation namespace from inputs
-    safe_globals = {"__builtins__": {
-        "len": len, "int": int, "float": float, "str": str,
-        "bool": bool, "list": list, "dict": dict, "type": type,
-        "abs": abs, "min": min, "max": max, "round": round,
-        "True": True, "False": False, "None": None,
-        "isinstance": isinstance,
-    }}
-    safe_locals = dict(inputs)
-
     try:
-        result = eval(expression, safe_globals, safe_locals)  # noqa: S307
+        result = _safe_eval_condition(expression, dict(inputs))
         result = bool(result)
     except Exception as e:
         raise ValueError(f"Condition expression failed: {e}. Expression: '{expression}'") from e
