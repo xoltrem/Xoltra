@@ -1,28 +1,15 @@
-# Xoltra
+# automation-agent (browser ai capabilities)
 
-## Structure
+Kept as a separate top-level tool, NOT merged into frontend/ or backend/.
 
-```
-Xoltra/
-├── frontend/              Next.js app — ONE package.json
-├── backend/                Flask (app.py, requirements.txt) — ONE package.json
-│   ├── secure-api/          Node: encrypted KV store (currently unused by the app)
-│   ├── auth-service/        Node: Google OAuth + OTP, hands off to Flask for a real JWT
-│   └── permission_bridge/    renamed from "Node/" — it's Python, not Node.js
-├── automation-agent/       Separate bolt-on tool (own agent + own Vite dashboard)
-│                            Kept outside frontend/backend — different build tooling
-│                            (Vite vs Next.js) means it can't share a package.json.
-└── vercel.json
-```
+Why: it has its own Node agent server AND its own Vite-based dashboard
+(different build tool than the main Next.js frontend — Vite and Next.js
+cannot share one package.json). Merging it would have meant either breaking
+the dashboard's build or silently dropping functionality. Two package.json
+files live here (this folder + dashboard/) as a result — an intentional,
+explained exception to the "one frontend / one backend package.json" rule,
+not an oversight.
 
-## Auth flow (Google OAuth <-> Flask)
-
-1. User signs in with Google + OTP via backend/auth-service/auth.js
-2. On success, auth.js calls Flask's POST /api/auth/oauth-issue (backend/auth.py)
-3. Flask finds-or-creates the user and returns a normal Flask JWT
-4. That JWT works with every existing @require_auth route — nothing else changes
-
-## Known issue, not yet resolved
-
-backend/secure-api is not called by anything in the live app (confirmed by
-grep across the whole codebase). Kept, not deleted — see its own README.
+Login.jsx was moved here from the repo root — it uses import.meta.env
+(Vite's convention, not Next.js's), and calls localhost:5000, matching
+auth-server.js exactly. It belongs to this dashboard, not the main app.

@@ -144,7 +144,30 @@ router.post('/verify-otp', async (req, res) => {
   }
 
   await redis.del(key); // single-use — consume immediately
-  res.json({ success: true, email: email.toLowerCase() });
+  // ── Flask handoff: OAuth just confirmed identity, but Flask (auth.py) is
+  // the single source of truth for user records and JWTs. Every other
+  // backend feature (personalization, subscription, workflows) only
+  // understands Flask's JWT, so we mint one here instead of inventing a
+  // second, incompatible token type.
+  const FLASK_API_URL = process.env.FLASK_API_URL || 'http://localhost:5001';
+  try {
+    const { data } = await axios.post(`${FLASK_API_URL}/api/auth/oauth-issue`, {
+      email: email.toLowerCase(),
+      source: 'google_oauth',
+    }, { timeout: 5000 });
+
+    return res.json({
+      success: true,
+      email: email.toLowerCase(),
+      token: data.token,   // real Flask JWT — works with every existing @require_auth route
+      user: data.user,
+    });
+  } catch (err) {
+    console.error('[auth.js] Flask handoff failed:', err.message);
+    return res.status(502).json({
+      error: 'Signed in with Google, but could not complete account setup. Try again.',
+    });
+  }
 });
 
 module.exports = router;
