@@ -1,0 +1,6 @@
+flask
+flask-cors
+cohere
+chromadb
+pypdf
+python-dotenv
