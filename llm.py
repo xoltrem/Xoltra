@@ -22,6 +22,8 @@ load_dotenv(override=True)
 
 logger = logging.getLogger(__name__)
 
+from memory_router import memory_router
+
 COHERE_API_KEY = os.getenv("COHERE_API_KEY")
 
 
@@ -287,7 +289,7 @@ def safe_json_parse(raw: str) -> dict:
 # COHERE IMPLEMENTATION
 # ═══════════════════════════════════════════════════
 
-def _call_cohere(user_id: str, prompt: str, model: str, temperature: float,
+def _call_cohere(prompt: str, model: str, temperature: float,
                  preamble: Optional[str] = None) -> str:
     client = _init_cohere()
     kwargs = {
@@ -299,25 +301,6 @@ def _call_cohere(user_id: str, prompt: str, model: str, temperature: float,
     if preamble:
         kwargs["preamble"] = preamble
     response = client.chat(**kwargs)
-    
-    # Track usage
-    try:
-        import subscription_manager as sm
-        if hasattr(response, 'meta') and hasattr(response.meta, 'billed_units'):
-            tokens = 0
-            if response.meta.billed_units:
-                if hasattr(response.meta.billed_units, 'input_tokens') and response.meta.billed_units.input_tokens:
-                    tokens += response.meta.billed_units.input_tokens
-                if hasattr(response.meta.billed_units, 'output_tokens') and response.meta.billed_units.output_tokens:
-                    tokens += response.meta.billed_units.output_tokens
-            if tokens == 0:
-                tokens = (len(prompt) + len(response.text)) // 4
-        else:
-            tokens = (len(prompt) + len(response.text)) // 4
-        sm.record_usage(user_id, tokens)
-    except Exception as e:
-        logger.warning(f"[LLM] Failed to record usage: {e}")
-        
     return response.text.strip()
 
 
@@ -325,7 +308,7 @@ def _call_cohere(user_id: str, prompt: str, model: str, temperature: float,
 # UNIVERSAL LLM CALLER
 # ═══════════════════════════════════════════════════
 
-def call_llm(user_id: str, role: str, prompt: str, retries: int = 2,
+def call_llm(role: str, prompt: str, retries: int = 2,
              role_preamble: Optional[str] = None) -> str:
     config     = MODEL_ROUTING.get(role, MODEL_ROUTING["architect"])
     model_key  = config["model_key"]
@@ -335,7 +318,7 @@ def call_llm(user_id: str, role: str, prompt: str, retries: int = 2,
     last_error = None
     for attempt in range(retries + 1):
         try:
-            raw = _call_cohere(user_id, prompt, model_name, temp, preamble=role_preamble)
+            raw = _call_cohere(prompt, model_name, temp, preamble=role_preamble)
             if role not in PROSE_ROLES:
                 return clean_json(raw)
             return raw
@@ -354,50 +337,24 @@ def call_llm(user_id: str, role: str, prompt: str, retries: int = 2,
 # EMBEDDINGS
 # ═══════════════════════════════════════════════════
 
-def generate_embedding(user_id: str, text: str) -> list:
+def generate_embedding(text: str) -> list:
     try:
         client   = _init_cohere()
         response = client.embed(
             texts=[text], model="embed-english-v3.0", input_type="search_document"
         )
-        try:
-            import subscription_manager as sm
-            if hasattr(response, 'meta') and hasattr(response.meta, 'billed_units'):
-                tokens = 0
-                if response.meta.billed_units and hasattr(response.meta.billed_units, 'input_tokens') and response.meta.billed_units.input_tokens:
-                    tokens = response.meta.billed_units.input_tokens
-                if tokens == 0:
-                    tokens = len(text) // 4
-            else:
-                tokens = len(text) // 4
-            sm.record_usage(user_id, tokens)
-        except Exception:
-            pass
         return response.embeddings[0]
     except Exception as e:
         logger.warning(f"[EMBEDDING] Failed: {e}")
         return []
 
 
-def generate_query_embedding(user_id: str, text: str) -> list:
+def generate_query_embedding(text: str) -> list:
     try:
         client   = _init_cohere()
         response = client.embed(
             texts=[text], model="embed-english-v3.0", input_type="search_query"
         )
-        try:
-            import subscription_manager as sm
-            if hasattr(response, 'meta') and hasattr(response.meta, 'billed_units'):
-                tokens = 0
-                if response.meta.billed_units and hasattr(response.meta.billed_units, 'input_tokens') and response.meta.billed_units.input_tokens:
-                    tokens = response.meta.billed_units.input_tokens
-                if tokens == 0:
-                    tokens = len(text) // 4
-            else:
-                tokens = len(text) // 4
-            sm.record_usage(user_id, tokens)
-        except Exception:
-            pass
         return response.embeddings[0]
     except Exception as e:
         logger.warning(f"[QUERY_EMBEDDING] Failed: {e}")
@@ -408,44 +365,284 @@ def generate_query_embedding(user_id: str, text: str) -> list:
 # AGENT WRAPPERS — 14 agents
 # ═══════════════════════════════════════════════════
 
-def call_router(user_id: str, prompt: str, role_preamble: Optional[str] = None) -> str:
-    return call_llm(user_id, "router", prompt, role_preamble=role_preamble)
+def call_router(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("router", prompt, role_preamble=role_preamble)
 
-def call_clarifier(user_id: str, prompt: str, role_preamble: Optional[str] = None) -> str:
-    return call_llm(user_id, "clarifier", prompt, role_preamble=role_preamble)
+def call_clarifier(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("clarifier", prompt, role_preamble=role_preamble)
 
-def call_extractor(user_id: str, prompt: str, role_preamble: Optional[str] = None) -> str:
-    return call_llm(user_id, "extractor", prompt, role_preamble=role_preamble)
+def call_extractor(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("extractor", prompt, role_preamble=role_preamble)
 
-def call_architect(user_id: str, prompt: str, role_preamble: Optional[str] = None) -> str:
-    return call_llm(user_id, "architect", prompt, role_preamble=role_preamble)
+def call_architect(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("architect", prompt, role_preamble=role_preamble)
 
-def call_critic(user_id: str, prompt: str, role_preamble: Optional[str] = None) -> str:
-    return call_llm(user_id, "critic", prompt, role_preamble=role_preamble)
+def call_critic(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("critic", prompt, role_preamble=role_preamble)
 
-def call_operator(user_id: str, prompt: str, role_preamble: Optional[str] = None) -> str:
-    return call_llm(user_id, "operator", prompt, role_preamble=role_preamble)
+def call_operator(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("operator", prompt, role_preamble=role_preamble)
 
-def call_auditor(user_id: str, prompt: str, role_preamble: Optional[str] = None) -> str:
-    return call_llm(user_id, "auditor", prompt, role_preamble=role_preamble)
+def call_auditor(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("auditor", prompt, role_preamble=role_preamble)
 
-def call_validator(user_id: str, prompt: str, role_preamble: Optional[str] = None) -> str:
-    return call_llm(user_id, "validator", prompt, role_preamble=role_preamble)
+def call_validator(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("validator", prompt, role_preamble=role_preamble)
 
-def call_compiler(user_id: str, prompt: str, role_preamble: Optional[str] = None) -> str:
-    return call_llm(user_id, "compiler", prompt, role_preamble=role_preamble)
+def call_compiler(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("compiler", prompt, role_preamble=role_preamble)
 
-def call_qa(user_id: str, prompt: str, role_preamble: Optional[str] = None) -> str:
-    return call_llm(user_id, "qa", prompt, role_preamble=role_preamble)
+def call_qa(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("qa", prompt, role_preamble=role_preamble)
 
-def call_knowledge_retriever(user_id: str, prompt: str, role_preamble: Optional[str] = None) -> str:
-    return call_llm(user_id, "knowledge_retriever", prompt, role_preamble=role_preamble)
+def call_knowledge_retriever(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("knowledge_retriever", prompt, role_preamble=role_preamble)
 
-def call_knowledge_linker(user_id: str, prompt: str, role_preamble: Optional[str] = None) -> str:
-    return call_llm(user_id, "knowledge_linker", prompt, role_preamble=role_preamble)
+def call_knowledge_linker(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("knowledge_linker", prompt, role_preamble=role_preamble)
 
-def call_insight_generator(user_id: str, prompt: str, role_preamble: Optional[str] = None) -> str:
-    return call_llm(user_id, "insight_generator", prompt, role_preamble=role_preamble)
+def call_insight_generator(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("insight_generator", prompt, role_preamble=role_preamble)
 
-def call_deduplicator(user_id: str, prompt: str, role_preamble: Optional[str] = None) -> str:
-    return call_llm(user_id, "deduplicator", prompt, role_preamble=role_preamble)
+def call_deduplicator(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("deduplicator", prompt, role_preamble=role_preamble)
+
+
+# ═══════════════════════════════════════════════════
+# PIPELINE ORCHESTRATION  (MemoryRouter-aware)
+# Agents imported inside functions to avoid circular
+# imports (agents.py imports from llm.py).
+# ═══════════════════════════════════════════════════
+
+def run_pipeline(thread_id: str, user_input: str,
+                 role_preamble: Optional[str] = None) -> dict:
+    """
+    Main entry point. Call this when the user submits a new goal.
+
+    Returns one of:
+      { "status": "WAITING_FOR_USER", "questions": [...], "thread_id": ... }
+        → show questions to the user, then call resume_pipeline() with answers
+
+      { "status": "COMPLETE", "output": "...", "tier": {...}, "thread_id": ... }
+        → pipeline finished, render output
+
+      { "status": "ERROR", "error": "...", "thread_id": ... }
+    """
+    from agents import RouterAgent, ClarifierAgent, QAAgent  # local to avoid circular
+
+    # User may be returning to an already-paused session
+    existing = memory_router.resume_session(thread_id)
+    if existing and existing.get("status") == "WAITING_FOR_USER":
+        return {
+            "status":     "WAITING_FOR_USER",
+            "stage":      existing.get("stage"),
+            "questions":  existing.get("clarification_questions", []),
+            "thread_id":  thread_id,
+        }
+
+    # ── Stage 1: Route ──
+    memory_router.save_temporary_session(thread_id, {
+        "status":       "RUNNING",
+        "stage":        "routing",
+        "goal":         user_input,
+        "role_preamble": role_preamble,
+    })
+
+    try:
+        route = RouterAgent().run(user_input, role_preamble=role_preamble)
+    except Exception as exc:
+        logger.error("[Pipeline] Router failed for thread=%s: %s", thread_id, exc)
+        return {"status": "ERROR", "error": str(exc), "thread_id": thread_id}
+
+    complexity          = route.get("complexity", "medium")
+    mode                = route.get("mode", "default")
+    pipeline_depth      = route.get("pipeline_depth", "standard")
+    needs_clarification = route.get("needs_clarification", False)
+
+    apply_tier(complexity)
+
+    # ── Simple path: Router → QA only ──
+    if complexity == "simple":
+        try:
+            output = QAAgent().run(
+                user_input, complexity=complexity,
+                mode=mode, role_preamble=role_preamble,
+            )
+        except Exception as exc:
+            return {"status": "ERROR", "error": str(exc), "thread_id": thread_id}
+
+        memory_router.complete_session(thread_id)
+        return {
+            "status":    "COMPLETE",
+            "output":    output,
+            "tier":      get_active_tier(),
+            "mode":      mode,
+            "thread_id": thread_id,
+        }
+
+    # ── Stage 2: Clarify if needed ──
+    if needs_clarification:
+        try:
+            clarifier_result = ClarifierAgent().run(user_input, role_preamble=role_preamble)
+            questions        = clarifier_result.get("questions", [])
+        except Exception as exc:
+            return {"status": "ERROR", "error": str(exc), "thread_id": thread_id}
+
+        memory_router.save_temporary_session(thread_id, {
+            "status":                  "WAITING_FOR_USER",
+            "stage":                   "clarifying",
+            "goal":                    user_input,
+            "mode":                    mode,
+            "complexity":              complexity,
+            "pipeline_depth":          pipeline_depth,
+            "role_preamble":           role_preamble,
+            "clarification_questions": questions,
+        })
+        # ↑ MemoryRouter auto-pushes to Redis because status == WAITING_FOR_USER
+
+        return {
+            "status":    "WAITING_FOR_USER",
+            "stage":     "clarifying",
+            "questions": questions,
+            "thread_id": thread_id,
+        }
+
+    # ── No clarification needed — go straight to build ──
+    return _run_build_pipeline(
+        thread_id=thread_id,
+        goal=user_input,
+        mode=mode,
+        complexity=complexity,
+        role_preamble=role_preamble,
+        context_nodes=None,
+    )
+
+
+def resume_pipeline(thread_id: str, clarification_answers: dict,
+                    role_preamble: Optional[str] = None) -> dict:
+    """
+    Called when user submits answers to clarification questions.
+    Transparently continues from the saved state — no restart needed.
+
+    clarification_answers: { "q1": "answer", "q2": "answer", ... }
+    """
+    state = memory_router.resume_session(thread_id)
+
+    if not state:
+        return {
+            "status": "ERROR",
+            "error":  "Session expired or not found. Please start again.",
+            "thread_id": thread_id,
+        }
+    if state.get("status") != "WAITING_FOR_USER":
+        return {
+            "status": "ERROR",
+            "error":  f"Unexpected session state: {state.get('status')}",
+            "thread_id": thread_id,
+        }
+
+    # Enrich the original goal with the user's answers
+    goal         = state["goal"]
+    answers_text = "\n".join(f"- {k}: {v}" for k, v in clarification_answers.items())
+    enriched_goal = f"{goal}\n\nAdditional context from user:\n{answers_text}"
+
+    # Persist answers, mark as RUNNING again
+    state.update({
+        "status":                 "RUNNING",
+        "stage":                  "building",
+        "clarification_answers":  clarification_answers,
+    })
+    memory_router.save_temporary_session(thread_id, state)
+
+    apply_tier(state.get("complexity", "medium"))
+
+    return _run_build_pipeline(
+        thread_id=thread_id,
+        goal=enriched_goal,
+        mode=state.get("mode", "default"),
+        complexity=state.get("complexity", "medium"),
+        role_preamble=state.get("role_preamble") or role_preamble,
+        context_nodes=state.get("context_nodes"),
+    )
+
+
+def _run_build_pipeline(thread_id: str, goal: str, mode: str,
+                        complexity: str, role_preamble: Optional[str],
+                        context_nodes: Optional[list]) -> dict:
+    """
+    Internal: Architect → Critic/Operator loop → Validator → Compiler.
+    Saves stage checkpoints via MemoryRouter so restarts can recover.
+    """
+    from agents import (  # local to avoid circular
+        ArchitectAgent, CriticAgent, OperatorAgent,
+        ValidatorAgent, CompilerAgent,
+    )
+
+    MAX_CRITIC_LOOPS = 2
+
+    def _checkpoint(stage: str, extra: Optional[dict] = None):
+        memory_router.save_temporary_session(thread_id, {
+            "status":       "RUNNING",
+            "stage":        stage,
+            "goal":         goal,
+            "mode":         mode,
+            "complexity":   complexity,
+            "role_preamble": role_preamble,
+            **(extra or {}),
+        })
+
+    try:
+        # ── Architect ──
+        _checkpoint("architecting")
+        blueprint = ArchitectAgent().run(
+            goal, context_nodes=context_nodes, role_preamble=role_preamble,
+        )
+
+        # ── Critic → Operator loop ──
+        for loop in range(MAX_CRITIC_LOOPS):
+            _checkpoint(f"reviewing_pass_{loop + 1}", {"blueprint": blueprint})
+            critique = CriticAgent().run(
+                blueprint, original_goal=goal, role_preamble=role_preamble,
+            )
+            if critique.get("status") == "pass":
+                break
+            issues = critique.get("issues", [])
+            if issues:
+                _checkpoint(f"fixing_pass_{loop + 1}", {"blueprint": blueprint})
+                blueprint = OperatorAgent().run(
+                    blueprint, issues=issues,
+                    original_goal=goal, role_preamble=role_preamble,
+                )
+
+        # ── Validator ──
+        _checkpoint("validating", {"blueprint": blueprint})
+        validation = ValidatorAgent().run(blueprint, role_preamble=role_preamble)
+        if validation.get("status") == "fail":
+            logger.warning(
+                "[Pipeline] Validator fail thread=%s: %s",
+                thread_id, validation.get("reason"),
+            )
+
+        # ── Compiler ──
+        _checkpoint("compiling", {"blueprint": blueprint})
+        output = CompilerAgent().run(
+            blueprint, original_goal=goal,
+            mode=mode, context_nodes=context_nodes,
+            role_preamble=role_preamble,
+        )
+
+    except Exception as exc:
+        logger.error("[Pipeline] Build failed thread=%s stage=%s: %s",
+                     thread_id, memory_router.get_status(thread_id), exc)
+        memory_router.complete_session(thread_id)
+        return {"status": "ERROR", "error": str(exc), "thread_id": thread_id}
+
+    memory_router.complete_session(thread_id)   # evict from L1 + Redis
+
+    return {
+        "status":    "COMPLETE",
+        "output":    output,
+        "tier":      get_active_tier(),
+        "mode":      mode,
+        "thread_id": thread_id,
+    }
