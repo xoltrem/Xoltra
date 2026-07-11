@@ -23,7 +23,7 @@ from agents import (
 )
 from roles import get_role_preamble
 from llm import apply_tier, is_agent_active, get_active_tier
-import subscription_manager as sm
+from memory_router import memory_router
 
 logger = logging.getLogger(__name__)
 
@@ -93,13 +93,13 @@ class WorkflowPipeline:
     # ─────────────────────────────────────────────
     # INTERNAL: route + apply tier
     # ─────────────────────────────────────────────
-    def _route(self, user_id: str, text: str, role_preamble: Optional[str] = None) -> dict:
+    def _route(self, text: str, role_preamble: Optional[str] = None) -> dict:
         """
         Runs Router then immediately applies the matching tier.
         Every pipeline entry point calls this first.
         """
         try:
-            router_data = self.router.run(user_id, text, role_preamble=role_preamble)
+            router_data = self.router.run(text, role_preamble=role_preamble)
         except Exception as e:
             logger.error(f"[Pipeline] Router failed: {e} — defaulting to medium")
             router_data = {
@@ -120,13 +120,10 @@ class WorkflowPipeline:
     # ─────────────────────────────────────────────
     # PUBLIC: get clarifying questions
     # ─────────────────────────────────────────────
-    def get_clarifications(self, user_id: str, goal: str, role_id: str = "default") -> dict:
-        can_run, msg = sm.can_execute(user_id)
-        if not can_run:
-            return _error_result(f"Subscription error: {msg}", role_id=role_id)
-
+    def get_clarifications(self, goal: str, role_id: str = "default",
+                           thread_id: str = None) -> dict:
         preamble    = get_role_preamble(role_id)
-        router_data = self._route(user_id, goal, role_preamble=preamble)
+        router_data = self._route(goal, role_preamble=preamble)
 
         mode       = router_data.get("mode", "default")
         complexity = router_data.get("complexity", "medium")
@@ -135,9 +132,22 @@ class WorkflowPipeline:
         questions = []
         if needs and is_agent_active("clarifier"):
             try:
-                questions = self.clarifier.run(user_id, goal, role_preamble=preamble).get("questions", [])
+                questions = self.clarifier.run(goal, role_preamble=preamble).get("questions", [])
             except Exception as e:
                 logger.warning(f"[Pipeline] Clarifier failed: {e}")
+
+        # Persist paused state so user can return later
+        if thread_id and needs and questions:
+            memory_router.save_temporary_session(thread_id, {
+                "status":                  "WAITING_FOR_USER",
+                "stage":                   "clarifying",
+                "goal":                    goal,
+                "mode":                    mode,
+                "complexity":              complexity,
+                "role_id":                 role_id,
+                "clarification_questions": questions,
+                "router":                  router_data,
+            })
 
         return {
             "needs_clarification": needs,
@@ -152,15 +162,23 @@ class WorkflowPipeline:
     # ─────────────────────────────────────────────
     # PUBLIC: run goal pipeline
     # ─────────────────────────────────────────────
-    def run(self, user_id: str, goal: str, mode: str = "default", answers: dict = None,
-            on_step: Callable = None, role_id: str = "default") -> dict:
+    def run(self, goal: str, mode: str = "default", answers: dict = None,
+            on_step: Callable = None, role_id: str = "default",
+            thread_id: str = None) -> dict:
 
-        can_run, msg = sm.can_execute(user_id)
-        if not can_run:
-            return _error_result(f"Subscription error: {msg}", role_id=role_id)
+        # Resume from saved state if user is returning after a pause
+        if thread_id:
+            saved = memory_router.resume_session(thread_id)
+            if saved and saved.get("status") == "WAITING_FOR_USER":
+                goal    = saved.get("goal", goal)
+                mode    = saved.get("mode", mode)
+                role_id = saved.get("role_id", role_id)
+                logger.info(f"[Pipeline] Resuming thread={thread_id} from WAITING_FOR_USER")
+                saved["status"] = "RUNNING"
+                memory_router.save_temporary_session(thread_id, saved)
 
         preamble    = get_role_preamble(role_id)
-        router_data = self._route(user_id, goal, role_preamble=preamble)
+        router_data = self._route(goal, role_preamble=preamble)
         complexity  = router_data.get("complexity", "medium")
 
         enriched_goal = goal
@@ -173,19 +191,16 @@ class WorkflowPipeline:
                 enriched_goal = f"{goal}\n\nAdditional context:\n" + "\n".join(lines)
 
         return self._run_pipeline(
-            user_id, enriched_goal, mode=mode, on_step=on_step,
-            role_preamble=preamble, role_id=role_id, complexity=complexity
+            enriched_goal, mode=mode, on_step=on_step,
+            role_preamble=preamble, role_id=role_id, complexity=complexity,
+            thread_id=thread_id
         )
 
     # ─────────────────────────────────────────────
     # PUBLIC: run document pipeline
     # ─────────────────────────────────────────────
-    def run_from_document(self, user_id: str, raw_text: str, on_step: Callable = None,
+    def run_from_document(self, raw_text: str, on_step: Callable = None,
                           role_id: str = "default") -> dict:
-        can_run, msg = sm.can_execute(user_id)
-        if not can_run:
-            return _error_result(f"Subscription error: {msg}", role_id=role_id)
-
         preamble = get_role_preamble(role_id)
 
         def step(name):
@@ -194,19 +209,19 @@ class WorkflowPipeline:
 
         step("Extractor")
         try:
-            extracted_goal = self.extractor.run(user_id, raw_text, role_preamble=preamble)
+            extracted_goal = self.extractor.run(raw_text, role_preamble=preamble)
         except Exception as e:
             return _error_result(f"Extractor failed: {e}", role_id=role_id)
 
         if not extracted_goal or not extracted_goal.strip():
             return _error_result("Extractor returned empty goal", role_id=role_id)
 
-        router_data = self._route(user_id, extracted_goal, role_preamble=preamble)
+        router_data = self._route(extracted_goal, role_preamble=preamble)
         mode        = router_data.get("mode", "default")
         complexity  = router_data.get("complexity", "medium")
 
         result = self._run_pipeline(
-            user_id, extracted_goal, mode=mode, on_step=on_step,
+            extracted_goal, mode=mode, on_step=on_step,
             role_preamble=preamble, role_id=role_id, complexity=complexity
         )
         result["extracted_goal"] = extracted_goal
@@ -214,12 +229,11 @@ class WorkflowPipeline:
         if self.knowledge_enabled and result.get("success"):
             try:
                 doc_id   = kdb.create_node(
-                    user_id=user_id,
                     node_type="document",
                     content={"source_type": "text", "extracted_goal": extracted_goal}
                 )
-                doc_node = kdb.get_node(user_id, doc_id, update_access=False)
-                ka.auto_link_node(user_id, doc_id, doc_node)
+                doc_node = kdb.get_node(doc_id, update_access=False)
+                ka.auto_link_node(doc_id, doc_node)
                 result["document_node_id"] = doc_id
             except Exception as e:
                 logger.warning(f"[Pipeline] Could not store document: {e}")
@@ -229,14 +243,10 @@ class WorkflowPipeline:
     # ─────────────────────────────────────────────
     # PUBLIC: adaptive Q&A
     # ─────────────────────────────────────────────
-    def run_adaptive(self, user_id: str, user_input: str, on_step: Callable = None,
+    def run_adaptive(self, user_input: str, on_step: Callable = None,
                      role_id: str = "default") -> dict:
-        can_run, msg = sm.can_execute(user_id)
-        if not can_run:
-            return _error_result(f"Subscription error: {msg}", role_id=role_id)
-
         preamble    = get_role_preamble(role_id)
-        router_data = self._route(user_id, user_input, role_preamble=preamble)
+        router_data = self._route(user_input, role_preamble=preamble)
 
         mode       = router_data.get("mode", "default")
         complexity = router_data.get("complexity", "medium")
@@ -250,7 +260,7 @@ class WorkflowPipeline:
             step("QA")
             try:
                 answer = self.qa.run(
-                    user_id, user_input, complexity=complexity,
+                    user_input, complexity=complexity,
                     mode=mode, role_preamble=preamble
                 )
                 return {
@@ -268,22 +278,29 @@ class WorkflowPipeline:
 
         # 🧠 Deep → full pipeline
         return self._run_pipeline(
-            user_id, user_input, mode=mode, on_step=on_step,
+            user_input, mode=mode, on_step=on_step,
             role_preamble=preamble, role_id=role_id, complexity=complexity
         )
 
     # ─────────────────────────────────────────────
     # INTERNAL: core pipeline with tier gating
     # ─────────────────────────────────────────────
-    def _run_pipeline(self, user_id: str, goal: str, mode: str = "default",
+    def _run_pipeline(self, goal: str, mode: str = "default",
                       on_step: Callable = None,
                       role_preamble: Optional[str] = None,
                       role_id: str = "default",
-                      complexity: str = "medium") -> dict:
+                      complexity: str = "medium",
+                      thread_id: str = None) -> dict:
 
         def step(name):
             logger.info(f"[Pipeline] {name}")
             if on_step: on_step(name)
+            if thread_id:
+                memory_router.save_temporary_session(thread_id, {
+                    "status": "RUNNING", "stage": name.lower().replace(" ", "_"),
+                    "goal": goal, "mode": mode,
+                    "complexity": complexity, "role_id": role_id,
+                })
 
         result = _base_result(mode, role_id, complexity)
 
@@ -293,15 +310,15 @@ class WorkflowPipeline:
             if self.knowledge_enabled and is_agent_active("knowledge_retriever"):
                 step("Knowledge check")
                 try:
-                    dup_check = ka.check_before_create(user_id, goal)
+                    dup_check = ka.check_before_create(goal)
 
                     if dup_check["action"] == "reuse":
                         existing = dup_check["existing_node"]
                         edges    = kdb.get_node_edges(
-                            user_id, existing["id"], direction="incoming", edge_type="derives_from"
+                            existing["id"], direction="incoming", edge_type="derives_from"
                         )
                         if edges:
-                            workflow = kdb.get_node(user_id, edges[0]["from_node"], update_access=True)
+                            workflow = kdb.get_node(edges[0]["from_node"], update_access=True)
                             if workflow:
                                 result["knowledge_used"] = True
                                 result["output_parsed"]  = workflow["content"]
@@ -310,7 +327,7 @@ class WorkflowPipeline:
                                     f"Originally created {workflow['created_at'][:10]} — "
                                     f"{dup_check['similarity']:.0%} match\n\n"
                                 ) + self.compiler.run(
-                                    user_id, workflow["content"], goal,
+                                    workflow["content"], goal,
                                     mode=mode, role_preamble=role_preamble
                                 )
                                 result["success"] = True
@@ -323,7 +340,7 @@ class WorkflowPipeline:
                             "similarity":    dup_check["similarity"],
                         }
 
-                    context_nodes = ka.get_context_for_pipeline(user_id, goal)
+                    context_nodes = ka.get_context_for_pipeline(goal)
                     if context_nodes:
                         result["knowledge_used"] = True
 
@@ -342,7 +359,7 @@ class WorkflowPipeline:
                 result["agents_used"].append("QA")
                 try:
                     answer = self.qa.run(
-                        user_id, goal, complexity=complexity,
+                        goal, complexity=complexity,
                         mode=mode, role_preamble=role_preamble
                     )
                     result["output"]  = answer
@@ -355,7 +372,7 @@ class WorkflowPipeline:
             result["agents_used"].append("Architect")
             try:
                 blueprint = self.architect.run(
-                    user_id, goal, context_nodes=context_nodes, role_preamble=role_preamble
+                    goal, context_nodes=context_nodes, role_preamble=role_preamble
                 )
             except Exception as e:
                 return _error_result(f"Architect failed: {e}", mode, role_id, complexity)
@@ -367,7 +384,7 @@ class WorkflowPipeline:
                 result["agents_used"].append("Critic")
                 try:
                     critique = self.critic.run(
-                        user_id, blueprint, original_goal=goal, role_preamble=role_preamble
+                        blueprint, original_goal=goal, role_preamble=role_preamble
                     )
                 except Exception as e:
                     logger.warning(f"[Pipeline] Critic failed: {e} — skipping")
@@ -383,7 +400,7 @@ class WorkflowPipeline:
                 result["agents_used"].append("Operator")
                 try:
                     blueprint = self.operator.run(
-                        user_id, blueprint, issues=critique["issues"],
+                        blueprint, issues=critique["issues"],
                         original_goal=goal, role_preamble=role_preamble
                     )
                     result["operator_used"] = True
@@ -402,7 +419,7 @@ class WorkflowPipeline:
                 result["agents_used"].append("Auditor")
                 try:
                     blueprint = self.auditor.run(
-                        user_id, blueprint, original_goal=goal, role_preamble=role_preamble
+                        blueprint, original_goal=goal, role_preamble=role_preamble
                     )
                 except Exception as e:
                     logger.warning(f"[Pipeline] Auditor failed: {e}")
@@ -413,7 +430,7 @@ class WorkflowPipeline:
                 step("Validator")
                 result["agents_used"].append("Validator")
                 try:
-                    validation = self.validator.run(user_id, blueprint, role_preamble=role_preamble)
+                    validation = self.validator.run(blueprint, role_preamble=role_preamble)
                 except Exception as e:
                     logger.warning(f"[Pipeline] Validator failed: {e}")
 
@@ -431,7 +448,7 @@ class WorkflowPipeline:
             result["agents_used"].append("Compiler")
             try:
                 compiled = self.compiler.run(
-                    user_id, blueprint, original_goal=goal, mode=mode,
+                    blueprint, original_goal=goal, mode=mode,
                     context_nodes=context_nodes, role_preamble=role_preamble
                 )
             except Exception as e:
@@ -448,7 +465,6 @@ class WorkflowPipeline:
                 step("Storing in knowledge base")
                 try:
                     goal_id     = kdb.create_node(
-                        user_id=user_id,
                         node_type="goal",
                         content={
                             "original_input": goal,
@@ -459,37 +475,39 @@ class WorkflowPipeline:
                         }
                     )
                     workflow_id = kdb.create_node(
-                        user_id=user_id,
                         node_type="workflow",
                         content=blueprint,
                         metadata={"mode": mode, "role_id": role_id, "complexity": complexity}
                     )
                     kdb.create_edge(
-                        user_id=user_id,
                         from_node=workflow_id, to_node=goal_id,
                         edge_type="derives_from", strength=1.0,
                         reason="Workflow created for goal"
                     )
-                    goal_node     = kdb.get_node(user_id, goal_id, update_access=False)
-                    workflow_node = kdb.get_node(user_id, workflow_id, update_access=False)
-                    ka.auto_link_node(user_id, goal_id, goal_node)
-                    ka.auto_link_node(user_id, workflow_id, workflow_node)
+                    goal_node     = kdb.get_node(goal_id, update_access=False)
+                    workflow_node = kdb.get_node(workflow_id, update_access=False)
+                    ka.auto_link_node(goal_id, goal_node)
+                    ka.auto_link_node(workflow_id, workflow_node)
 
                     result["goal_node_id"]     = goal_id
                     result["workflow_node_id"] = workflow_id
 
-                    stats = kdb.get_stats(user_id)
+                    stats = kdb.get_stats()
                     if stats["total_nodes"] > 0 and stats["total_nodes"] % 10 == 0:
-                        ka.generate_insights(user_id)
+                        ka.generate_insights()
 
                 except Exception as e:
                     logger.warning(f"[Pipeline] Knowledge storage failed (non-fatal): {e}")
 
             step("Complete")
+            if thread_id:
+                memory_router.complete_session(thread_id)
             return result
 
         except Exception as e:
             logger.error(f"[Pipeline] Unexpected error: {e}", exc_info=True)
+            if thread_id:
+                memory_router.complete_session(thread_id)
             return _error_result(f"Pipeline error: {e}", mode, role_id, complexity)
 
 
