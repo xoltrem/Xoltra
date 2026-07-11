@@ -223,6 +223,58 @@ def _exec_ai_cohere_generate(inputs: dict, params: dict) -> dict:
     }
 
 
+def _exec_ai_web_search(inputs: dict, params: dict) -> dict:
+    """
+    Live web search via SerpApi, summarized by the LLM and returned as
+    extra context for the agent pipeline. A search is a READ action and
+    goes through the Permission Bridge like every other node.
+    """
+    import requests
+    from llm import call_llm
+
+    query = inputs.get("query", "") or params.get("query", "")
+    if not query:
+        raise ValueError("ai.web_search requires a non-empty 'query' input")
+
+    num_results = int(params.get("num_results", 5))
+
+    _check_permission("ai.web_search", "GET", "serpapi.com", f"https://serpapi.com/search?q={query}")
+
+    api_key = os.environ.get("SERPAPI_API_KEY")
+    if not api_key:
+        raise RuntimeError("ai.web_search requires SERPAPI_API_KEY to be set")
+
+    resp = requests.get(
+        "https://serpapi.com/search",
+        params={"q": query, "api_key": api_key, "num": num_results},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    results = [
+        {
+            "title":   r.get("title", ""),
+            "snippet": r.get("snippet", ""),
+            "link":    r.get("link", ""),
+        }
+        for r in data.get("organic_results", [])[:num_results]
+    ]
+
+    if not results:
+        return {"query": query, "results": [], "summary": "No results found."}
+
+    context = "\n".join(f"- {r['title']}: {r['snippet']} ({r['link']})" for r in results)
+    summary = call_llm(
+        params.get("role", "architect"),
+        f"Summarize these live web search results for the query \"{query}\" "
+        f"into a concise answer with key facts:\n\n{context}",
+        retries=1,
+    )
+
+    return {"query": query, "results": results, "summary": summary}
+
+
 def _exec_ai_cohere_embed(inputs: dict, params: dict) -> dict:
     """
     Generate an embedding vector via Cohere using llm.py generate_embedding.
@@ -611,6 +663,19 @@ def _register_builtins():
             Port("role", "string", "LLM role used"),
         ],
         execute_fn=_exec_ai_cohere_generate,
+    ))
+
+    register(NodeDefinition(
+        node_type="ai.web_search",
+        category="ai",
+        label="Web Search",
+        description="Live web search via SerpApi, summarized and fed back into the agent pipeline as context.",
+        inputs=[Port("query", "string", "Search query")],
+        outputs=[
+            Port("results", "array", "Raw search results (title/snippet/link)"),
+            Port("summary", "string", "LLM summary of the results"),
+        ],
+        execute_fn=_exec_ai_web_search,
     ))
 
     register(NodeDefinition(

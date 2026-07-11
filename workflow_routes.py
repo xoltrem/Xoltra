@@ -30,6 +30,7 @@ from flask import Blueprint, request, jsonify
 import workflow_store
 import workflow_engine
 import node_library
+import knowledge_db as kdb
 from auth import require_auth, get_current_user_id
 
 logger = logging.getLogger(__name__)
@@ -267,6 +268,27 @@ def duplicate_workflow(workflow_id: str):
         return _err(str(e), 404)
     except Exception as e:
         logger.error(f"[/api/workflows/{workflow_id}/duplicate] {e}\n{traceback.format_exc()}")
+        return _err(str(e), 500)
+
+
+# ═══════════════════════════════════════════════════
+# CONVERSATION MEMORY DELETE
+# ═══════════════════════════════════════════════════
+
+@_wf_bp.route("/api/conversations/<conversation_id>/memory", methods=["DELETE"])
+@require_auth
+def delete_conversation_memory(conversation_id: str):
+    """
+    Deletes every knowledge node/edge/vector the AI learned from this chat.
+    Wire this to the frontend's existing "delete chat" action so deleting a
+    chat also erases what it taught the AI about the user.
+    """
+    user_id = get_current_user_id()
+    try:
+        deleted = kdb.delete_conversation_memory(user_id, conversation_id)
+        return _ok({"conversation_id": conversation_id, "nodes_deleted": deleted})
+    except Exception as e:
+        logger.error(f"[/api/conversations/{conversation_id}/memory] {e}\n{traceback.format_exc()}")
         return _err(str(e), 500)
 
 

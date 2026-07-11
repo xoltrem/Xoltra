@@ -102,11 +102,50 @@ async function sendOTPEmail(email, otp) {
   });
 }
 
+// ── middleware 4: per-IP rate limit (Redis INCR + TTL window) ──
+function rateLimitByIP(limit, windowSeconds) {
+  return async (req, res, next) => {
+    const ip  = req.ip || 'unknown';
+    const key = `ratelimit:${req.baseUrl}${req.path}:${ip}`;
+    try {
+      const count = await redis.incr(key);
+      if (count === 1) await redis.expire(key, windowSeconds);
+      if (count > limit) {
+        return res.status(429).json({ error: 'Too many requests. Please slow down and try again shortly.' });
+      }
+      next();
+    } catch {
+      next(); // Redis outage should never block login entirely
+    }
+  };
+}
+
+// ── middleware 5: device fingerprint — flags many accounts from one device ──
+async function checkDeviceFingerprint(req, res, next) {
+  const fp = req.body.fingerprint;
+  if (!fp || typeof fp !== 'string') return next(); // optional signal, don't hard-block on absence
+  try {
+    const hash = crypto.createHash('sha256').update(fp).digest('hex');
+    const key  = `fingerprint:${hash}`;
+    const count = await redis.incr(key);
+    if (count === 1) await redis.expire(key, 86400); // 24h window
+    req.deviceFingerprint = hash;
+    if (count > 5) {
+      return res.status(429).json({ error: 'Too many accounts created from this device today. Try again tomorrow.' });
+    }
+    next();
+  } catch {
+    next();
+  }
+}
+
 // ── POST /api/auth/google ──
 router.post('/google',
+  rateLimitByIP(10, 60),
   verifyTurnstile,
   verifyGoogleToken,
   blockDisposableEmail,
+  checkDeviceFingerprint,
   async (req, res) => {
     try {
       const otp = await generateOTP(req.googleEmail);
@@ -120,7 +159,7 @@ router.post('/google',
 );
 
 // ── POST /api/auth/verify-otp ──
-router.post('/verify-otp', async (req, res) => {
+router.post('/verify-otp', rateLimitByIP(10, 60), async (req, res) => {
   const { email, otp } = req.body;
   if (!email || !otp) return res.status(400).json({ error: 'Email and OTP required.' });
 

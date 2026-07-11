@@ -1,14 +1,3 @@
 {
-  "version": 2,
-  "functions": {
-    "server.js": {
-      "runtime": "nodejs18.x"
-    }
-  },
-  "rewrites": [
-    {
-      "source": "/(.*)",
-      "destination": "/server.js"
-    }
-  ]
+  "rewrites": [{ "source": "/(.*)", "destination": "/server.js" }]
 }
