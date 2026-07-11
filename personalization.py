@@ -245,7 +245,7 @@ Return ONLY JSON:
 interests and expertise: max 3 items each, only include if clearly evidenced. Empty [] if unclear.
 """
     try:
-        raw  = call_llm(user_id, "clarifier", prompt)
+        raw  = call_llm("clarifier", prompt)
         data = safe_json_parse(raw)
         data["updatedAt"] = _now()
         return data
@@ -281,7 +281,7 @@ def chat(user_id: str, message: str) -> dict:
     # Cohere has no separate "system" turn like Anthropic — preamble covers it,
     # so we pass the running history as plain conversational context in-prompt.
     convo = "\n".join(f"{m['role']}: {m['content']}" for m in history[-10:])
-    reply = call_llm(user_id, "qa", convo, role_preamble=preamble)
+    reply = call_llm("qa", convo, role_preamble=preamble)
 
     _append_history(user_id, "assistant", reply)
 

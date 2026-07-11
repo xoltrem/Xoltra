@@ -41,7 +41,7 @@ Return ONLY JSON:
 User message: {message}
 """
     try:
-        raw  = call_llm(user_id, _ASSISTANT_ROLE, prompt, role_preamble=preamble)
+        raw  = call_llm(_ASSISTANT_ROLE, prompt, role_preamble=preamble)
         data = safe_json_parse(raw)
     except Exception as e:
         logger.error(f"[WorkflowAssistant] failed for {user_id[:8]}: {e}")

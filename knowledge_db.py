@@ -96,7 +96,21 @@ def _create_tables(conn: sqlite3.Connection):
         created_at      TEXT NOT NULL,
         last_accessed   TEXT NOT NULL,
         access_count    INTEGER DEFAULT 0,
-        status          TEXT DEFAULT 'active'
+        status          TEXT DEFAULT 'active',
+        conversation_id TEXT,
+        version         INTEGER NOT NULL DEFAULT 1
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS node_versions (
+        id           TEXT PRIMARY KEY,
+        node_id      TEXT NOT NULL,
+        user_id      TEXT NOT NULL DEFAULT 'default',
+        version      INTEGER NOT NULL,
+        content      TEXT NOT NULL,
+        metadata     TEXT NOT NULL DEFAULT '{}',
+        created_at   TEXT NOT NULL
     )
     """)
 
@@ -144,6 +158,12 @@ def _create_tables(conn: sqlite3.Connection):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_nodes_user   ON nodes(user_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_edges_user   ON edges(user_id)")
 
+    # Migrations for conversation-scoped deletion + versioning
+    _add_column_if_not_exists(cursor, "nodes", "conversation_id", "TEXT")
+    _add_column_if_not_exists(cursor, "nodes", "version", "INTEGER NOT NULL DEFAULT 1")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_nodes_conversation ON nodes(conversation_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_versions_node ON node_versions(node_id)")
+
     conn.commit()
 
 
@@ -175,10 +195,13 @@ def create_node(
     node_type: str,
     content: dict,
     metadata: dict = None,
-    execution_state: dict = None
+    execution_state: dict = None,
+    conversation_id: str = None,
 ) -> str:
     """
     Create a knowledge node in SQLite + ChromaDB.
+    conversation_id (optional) tags the node so it can be wiped in bulk via
+    delete_conversation_memory() when the source chat is deleted.
     Returns node_id (UUID string).
     """
     _require_init()
@@ -191,13 +214,13 @@ def create_node(
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO nodes
-            (id, user_id, type, content, metadata, execution_state, created_at, last_accessed, access_count, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, user_id, type, content, metadata, execution_state, created_at, last_accessed, access_count, status, conversation_id, version)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         node_id, user_id, node_type,
         json.dumps(content), json.dumps(meta),
         json.dumps(execution_state) if execution_state else None,
-        now, now, 0, "active"
+        now, now, 0, "active", conversation_id, 1
     ))
     conn.commit()
 
@@ -275,10 +298,24 @@ def get_node(user_id: str, node_id: str, update_access: bool = True) -> Optional
 
 
 def update_node(user_id: str, node_id: str, updates: dict) -> bool:
+    """
+    Update a node. Every write is versioned: the pre-update snapshot is
+    archived to node_versions before the new values are applied, and the
+    node's version counter is incremented. Use rollback_node_version() to
+    recover from a bad write.
+    """
     _require_init()
 
     conn   = _get_conn()
     cursor = conn.cursor()
+
+    cursor.execute(
+        "SELECT content, metadata, version FROM nodes WHERE id = ? AND user_id = ?",
+        (node_id, user_id)
+    )
+    row = cursor.fetchone()
+    if not row:
+        return False
 
     set_clauses, values = [], []
     for field in ["content", "metadata", "execution_state", "status"]:
@@ -290,11 +327,43 @@ def update_node(user_id: str, node_id: str, updates: dict) -> bool:
     if not set_clauses:
         return False
 
+    # Archive pre-update snapshot, then bump version
+    cursor.execute("""
+        INSERT INTO node_versions (id, node_id, user_id, version, content, metadata, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (
+        str(uuid.uuid4()), node_id, user_id, row["version"],
+        row["content"], row["metadata"], datetime.utcnow().isoformat()
+    ))
+
+    set_clauses.append("version = version + 1")
     values.extend([node_id, user_id])
     cursor.execute(
         f"UPDATE nodes SET {', '.join(set_clauses)} WHERE id = ? AND user_id = ?",
         values
     )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def rollback_node_version(user_id: str, node_id: str, version: int) -> bool:
+    """Restore a node's content/metadata to a prior archived version."""
+    _require_init()
+
+    conn   = _get_conn()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT content, metadata FROM node_versions WHERE node_id = ? AND user_id = ? AND version = ?",
+        (node_id, user_id, version)
+    )
+    row = cursor.fetchone()
+    if not row:
+        return False
+
+    cursor.execute("""
+        UPDATE nodes SET content = ?, metadata = ?, version = version + 1
+        WHERE id = ? AND user_id = ?
+    """, (row["content"], row["metadata"], node_id, user_id))
     conn.commit()
     return cursor.rowcount > 0
 
@@ -321,6 +390,52 @@ def get_nodes_by_type(user_id: str, node_type: str, status: str = "active") -> L
         }
         for row in rows
     ]
+
+
+def delete_conversation_memory(user_id: str, conversation_id: str) -> int:
+    """
+    Permanently deletes every knowledge node (and their edges + vectors +
+    version history) tagged with conversation_id. Called when a chat is
+    deleted in the UI, so nothing the AI learned from that chat survives it.
+    Returns the number of nodes deleted.
+    """
+    _require_init()
+
+    conn   = _get_conn()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id FROM nodes WHERE user_id = ? AND conversation_id = ?",
+        (user_id, conversation_id)
+    )
+    node_ids = [row["id"] for row in cursor.fetchall()]
+    if not node_ids:
+        return 0
+
+    placeholders = ",".join("?" * len(node_ids))
+
+    cursor.execute(
+        f"DELETE FROM edges WHERE user_id = ? AND (from_node IN ({placeholders}) OR to_node IN ({placeholders}))",
+        [user_id, *node_ids, *node_ids]
+    )
+    cursor.execute(
+        f"DELETE FROM node_versions WHERE user_id = ? AND node_id IN ({placeholders})",
+        [user_id, *node_ids]
+    )
+    cursor.execute(
+        "DELETE FROM nodes WHERE user_id = ? AND conversation_id = ?",
+        (user_id, conversation_id)
+    )
+    conn.commit()
+
+    collection = _get_user_collection(user_id)
+    if collection is not None:
+        try:
+            collection.delete(ids=node_ids)
+        except Exception as e:
+            logger.warning(f"[Knowledge] Chroma delete failed for conversation {conversation_id}: {e}")
+
+    logger.info(f"[Knowledge] Deleted {len(node_ids)} node(s) for conversation={conversation_id}, user={user_id}")
+    return len(node_ids)
 
 
 # ═══════════════════════════════════════════════════

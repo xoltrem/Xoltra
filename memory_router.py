@@ -29,7 +29,10 @@ import threading
 from datetime import datetime, timezone
 from typing import Optional
 
-from upstash_redis import Redis
+try:
+    from upstash_redis import Redis
+except ImportError:
+    Redis = None  # package not installed — L2 (Redis) tier degrades to no-op, L1 still works
 
 logger = logging.getLogger(__name__)
 
@@ -65,10 +68,17 @@ class MemoryRouter:
     _lock = threading.Lock()
 
     def __init__(self):
-        self._redis = Redis(
-            url=os.environ["UPSTASH_REDIS_REST_URL"],
-            token=os.environ["UPSTASH_REDIS_REST_TOKEN"],
-        )
+        url   = os.environ.get("UPSTASH_REDIS_REST_URL")
+        token = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+        if Redis is None or not url or not token:
+            self._redis = None
+            logger.warning(
+                "[MemoryRouter] Redis L2 tier disabled (missing upstash-redis package or "
+                "UPSTASH_REDIS_REST_URL/UPSTASH_REDIS_REST_TOKEN). Sessions only survive "
+                "in-process (L1) and will be lost on restart."
+            )
+        else:
+            self._redis = Redis(url=url, token=token)
 
     # ── public API ───────────────────────────────────────────────────────────
 

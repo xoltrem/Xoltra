@@ -34,7 +34,7 @@ from email.mime.multipart import MIMEMultipart
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Any, Callable
 
-from Node.permission_bridge import create_permission_bridge, NodeManifest, NodeAction
+from permission_bridge.permission_bridge import create_permission_bridge, NodeManifest, NodeAction
 
 
 logger = logging.getLogger(__name__)

@@ -37,7 +37,7 @@ class RouterAgent:
 
     def run(self, user_id: str, user_input: str,
             role_preamble: Optional[str] = None) -> dict:
-        raw = call_router(user_id, f"""
+        raw = call_router(f"""
 You are an intelligent request classifier for an AI execution system.
 
 Analyze the input and classify across four dimensions:
@@ -83,7 +83,7 @@ class ClarifierAgent:
 
     def run(self, user_id: str, goal: str,
             role_preamble: Optional[str] = None) -> dict:
-        raw = call_clarifier(user_id, f"""
+        raw = call_clarifier( f"""
 You are a strategic intake specialist generating clarifying questions before building an execution plan.
 
 Generate 3-5 questions that would significantly improve the plan.
@@ -115,7 +115,7 @@ class PDFExtractorAgent:
 
     def run(self, user_id: str, raw_text: str,
             role_preamble: Optional[str] = None) -> str:
-        return call_extractor(user_id, f"""
+        return call_extractor( f"""
 You are a precision document analyst.
 Convert raw document text into an actionable goal statement — 3-6 sentences.
 Frame it as if a human is describing their goal to a strategic advisor.
@@ -154,7 +154,7 @@ class ArchitectAgent:
                 )
             context_section += "\nUse these for inspiration. Build a fresh plan for the current goal.\n"
 
-        raw = call_architect(user_id, f"""
+        raw = call_architect( f"""
 You are a world-class strategic execution architect.
 Transform the goal into a structured execution blueprint.
 Output ONLY valid JSON — no preamble, no markdown, no text outside JSON.
@@ -202,7 +202,7 @@ class CriticAgent:
 
     def run(self, user_id: str, blueprint: dict, original_goal: str,
             role_preamble: Optional[str] = None) -> dict:
-        raw = call_critic(user_id, f"""
+        raw = call_critic( f"""
 Ruthless plan reviewer. Your job is to find every flaw.
 
 Check for:
@@ -241,7 +241,7 @@ class OperatorAgent:
         original_goal: str,
         role_preamble: Optional[str] = None
     ) -> dict:
-        raw = call_operator(user_id, f"""
+        raw = call_operator( f"""
 Pragmatic fixer. Fix every issue listed precisely.
 
 Rules:
@@ -267,7 +267,7 @@ class AuditorAgent:
 
     def run(self, user_id: str, blueprint: dict, original_goal: str,
             role_preamble: Optional[str] = None) -> dict:
-        raw = call_auditor(user_id, f"""
+        raw = call_auditor( f"""
 Precision auditor. Sharpen without changing structure.
 
 Improve:
@@ -297,7 +297,7 @@ class ValidatorAgent:
 
     def run(self, user_id: str, blueprint: dict,
             role_preamble: Optional[str] = None) -> dict:
-        raw = call_validator(user_id, f"""
+        raw = call_validator( f"""
 Strict JSON schema validator. Binary — pass or fail only.
 
 Required fields:
@@ -395,7 +395,7 @@ Each risk as a paragraph: what it is, why it happens, exact mitigation.
                     f"{relevance:.0%} relevant): {summary}...\n\n"
                 )
 
-        compiled = call_compiler(user_id, f"""
+        compiled = call_compiler( f"""
 You are an expert execution strategist and writer.
 
 {style}
@@ -435,7 +435,7 @@ class QAAgent:
         }.get(complexity, "2-3 paragraphs")
 
         if mode == "coach":
-            return call_qa(user_id, f"""
+            return call_qa( f"""
 You are a world-class coach. Help the user understand — never just give the answer.
 
 - Break down the key concepts they need
@@ -447,7 +447,7 @@ You are a world-class coach. Help the user understand — never just give the an
 Question: {question}
 """, role_preamble=role_preamble)
         else:
-            return call_qa(user_id, f"""
+            return call_qa( f"""
 You are a direct, expert responder. Two qualities combined: direct AND detailed.
 
 - Lead with the answer immediately — no preamble
@@ -470,7 +470,7 @@ class KnowledgeLinkerAgent:
 
     def run(self, user_id: str, source_node: dict, candidate_nodes: list,
             role_preamble: Optional[str] = None) -> dict:
-        raw = call_knowledge_linker(user_id, f"""
+        raw = call_knowledge_linker( f"""
 You are a knowledge graph relationship expert.
 
 Analyze if these nodes should be linked and how.
@@ -508,7 +508,7 @@ class DeduplicatorAgent:
 
     def run(self, user_id: str, goal: str, similar_goals: list,
             role_preamble: Optional[str] = None) -> dict:
-        raw = call_deduplicator(user_id, f"""
+        raw = call_deduplicator( f"""
 You are a duplication detection specialist.
 
 Analyze if this new goal is essentially the same as existing goals.

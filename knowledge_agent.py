@@ -163,7 +163,7 @@ Only describe patterns you observed.
 """
 
     try:
-        raw      = call_insight_generator(user_id, prompt)
+        raw      = call_insight_generator(prompt)
         # Insight generator is a PROSE_ROLE but we need JSON here
         # Use safe_json_parse directly
         from llm import safe_json_parse, clean_json

@@ -280,8 +280,8 @@ def duplicate_workflow(workflow_id: str):
 def delete_conversation_memory(conversation_id: str):
     """
     Deletes every knowledge node/edge/vector the AI learned from this chat.
-    Wire this to the frontend's existing "delete chat" action so deleting a
-    chat also erases what it taught the AI about the user.
+    Wire this to the frontend's "delete chat" action so deleting a chat
+    also erases what it taught the AI about the user.
     """
     user_id = get_current_user_id()
     try:

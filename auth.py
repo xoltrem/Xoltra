@@ -18,7 +18,10 @@ import jwt
 from flask import Blueprint, request, jsonify, g
 
 import knowledge_db as kdb
-import subscription_manager as sm
+# NOTE: subscription_manager is imported lazily inside functions below, not
+# here at module level — it does `from auth import require_auth` at its own
+# module level, so importing it here would create a circular import that
+# crashes the app on boot the moment both modules are loaded.
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +161,7 @@ def register():
         conn.commit()
         
         # Provision free trial subscription
+        import subscription_manager as sm
         sm.activate_trial(user_id)
         
         token = generate_token(user_id)
@@ -208,53 +212,6 @@ def login():
             "email": user["email"]
         }
     })
-
-@auth_bp.route("/oauth-issue", methods=["POST"])
-def oauth_issue():
-    """
-    Server-to-server only — called by auth-service/auth.js right after it
-    verifies a Google OAuth + OTP login. Google confirms WHO the person is;
-    this endpoint is what makes them an actual Xoltra user by finding or
-    creating their account and handing back a normal Flask JWT — the same
-    kind every other route (@require_auth) already understands.
-
-    Not meant to be called directly by a browser. In production, restrict
-    this route to the auth-service's IP or a shared internal secret header.
-    """
-    init_auth_tables()
-
-    body  = request.get_json(silent=True) or {}
-    email = (body.get("email") or "").strip().lower()
-    source = body.get("source", "unknown")
-
-    if not email:
-        return _err("email is required")
-
-    conn = kdb._get_conn()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, email FROM users WHERE email = ?", (email,))
-    user = cursor.fetchone()
-
-    if user:
-        user_id = user["id"]
-    else:
-        user_id = str(uuid.uuid4())
-        now = datetime.now(timezone.utc).isoformat()
-        placeholder_hash = _hash_password(secrets.token_hex(32))  # OAuth users never use this
-        cursor.execute("""
-            INSERT INTO users (id, email, password_hash, created_at, is_active)
-            VALUES (?, ?, ?, ?, 1)
-        """, (user_id, email, placeholder_hash, now))
-        conn.commit()
-        sm.activate_trial(user_id)
-        logger.info(f"[Auth] New user via {source}: {email} ({user_id})")
-
-    token = generate_token(user_id)
-    return _ok({
-        "token": token,
-        "user": {"id": user_id, "email": email},
-    })
-
 
 @auth_bp.route("/me", methods=["GET"])
 @require_auth
@@ -331,6 +288,7 @@ def oauth_issue():
         """, (user_id, email, unusable_password_hash, now))
         conn.commit()
 
+        import subscription_manager as sm
         sm.activate_trial(user_id)
         logger.info(f"[Auth] OAuth-created new user: {email} ({user_id})")
 
