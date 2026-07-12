@@ -1,0 +1,192 @@
+/**
+ * api.ts
+ *
+ * Two backend URLs, primary + fallback, both driven by environment
+ * variables (not hardcoded ports) so this works unchanged across:
+ *   - local dev        (Flask on 5001, Node agent on 4000)
+ *   - any cloud deploy  (Vercel etc — no custom ports, just HTTPS domains)
+ *
+ * If the primary backend errors or is unreachable, requests automatically
+ * retry against the fallback backend before failing.
+ *
+ * Set these in .env.local (dev) or your host's env var dashboard (prod):
+ *   NEXT_PUBLIC_API_URL           -> primary backend
+ *   NEXT_PUBLIC_API_URL_FALLBACK  -> fallback backend
+ */
+
+const PRIMARY_URL  = process.env.NEXT_PUBLIC_API_URL          || 'http://localhost:5001';
+const FALLBACK_URL = process.env.NEXT_PUBLIC_API_URL_FALLBACK || 'http://localhost:4000';
+
+function getToken() {
+  try { return localStorage.getItem('xoltra_token'); } catch { return null; }
+}
+
+export function setToken(token: string) {
+  try { localStorage.setItem('xoltra_token', token); } catch { /* private browsing etc — non-fatal */ }
+}
+
+export function clearToken() {
+  try { localStorage.removeItem('xoltra_token'); } catch { /* noop */ }
+}
+
+async function tryFetch(base: string, endpoint: string, options: RequestInit) {
+  const token = getToken();
+  const res = await fetch(`${base}/api${endpoint}`, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...options.headers,
+    },
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.success === false) {
+    throw new Error(data.error || `API Error: ${res.status}`);
+  }
+  return data;
+}
+
+export async function fetchApi(endpoint: string, options: RequestInit = {}) {
+  try {
+    return await tryFetch(PRIMARY_URL, endpoint, options);
+  } catch (primaryErr) {
+    // Primary down or erroring — try the fallback before giving up.
+    if (!FALLBACK_URL || FALLBACK_URL === PRIMARY_URL) throw primaryErr;
+    try {
+      const result = await tryFetch(FALLBACK_URL, endpoint, options);
+      console.warn(`[api] Primary backend failed, used fallback for ${endpoint}`);
+      return result;
+    } catch (fallbackErr) {
+      throw primaryErr; // surface the original error, it's usually more informative
+    }
+  }
+}
+
+// ─── Auth (auth.py) ─────────────────────────────────────────────────────────
+export const register = (email: string, password: string) =>
+  fetchApi('/auth/register', { method: 'POST', body: JSON.stringify({ email, password }) });
+export const login = (email: string, password: string) =>
+  fetchApi('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) });
+export const getMe = () => fetchApi('/auth/me');
+
+// ─── Health / Roles (app.py) ────────────────────────────────────────────────
+export const getHealth = () => fetchApi('/health');
+export const getRoles = () => fetchApi('/roles');
+export const getRole = (roleId: string) => fetchApi(`/roles/${roleId}`);
+
+// ─── Goal Pipeline (app.py) ─────────────────────────────────────────────────
+export const clarifyGoal = (goal: string, roleId = 'default') =>
+  fetchApi('/clarify', { method: 'POST', body: JSON.stringify({ goal, role_id: roleId }) });
+export const runGoal = (goal: string, mode = 'default', answers = {}, roleId = 'default', conversationId?: string) =>
+  fetchApi('/run', { method: 'POST', body: JSON.stringify({ goal, mode, answers, role_id: roleId, conversation_id: conversationId }) });
+
+/**
+ * Streaming counterpart to runGoal() — calls onStep(name) as each pipeline
+ * stage (Router, Clarifier, Architect...) starts, then resolves with the
+ * same result shape runGoal() returns. Needs fetch + a stream reader (not
+ * `new EventSource`) since this is a POST with an auth header.
+ */
+export async function runGoalStream(
+  goal: string,
+  onStep: (step: string) => void,
+  opts: { mode?: string; answers?: object; roleId?: string; conversationId?: string } = {},
+): Promise<any> {
+  const { mode = 'default', answers = {}, roleId = 'default', conversationId } = opts;
+  const token = getToken();
+
+  const res = await fetch(`${PRIMARY_URL}/api/run/stream`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ goal, mode, answers, role_id: roleId, conversation_id: conversationId }),
+  });
+  if (!res.ok || !res.body) throw new Error(`Stream request failed (${res.status})`);
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    // SSE frames are separated by a blank line; parse whatever full frames we have
+    let frameEnd;
+    while ((frameEnd = buffer.indexOf('\n\n')) !== -1) {
+      const frame = buffer.slice(0, frameEnd);
+      buffer = buffer.slice(frameEnd + 2);
+
+      const eventLine = frame.split('\n').find(l => l.startsWith('event: '));
+      const dataLine  = frame.split('\n').find(l => l.startsWith('data: '));
+      if (!eventLine || !dataLine) continue;
+
+      const event = eventLine.slice(7).trim();
+      const data  = JSON.parse(dataLine.slice(6));
+
+      if (event === 'step') onStep(data.step);
+      else if (event === 'error') throw new Error(data.error);
+      else if (event === 'done') return data;
+    }
+  }
+  throw new Error('Stream ended without a result');
+}
+export const runDocument = (text: string, roleId = 'default') =>
+  fetchApi('/run-document', { method: 'POST', body: JSON.stringify({ text, role_id: roleId }) });
+export const askQuestion = (question: string, roleId = 'default') =>
+  fetchApi('/qa', { method: 'POST', body: JSON.stringify({ question, role_id: roleId }) });
+
+// ─── Workflow Assistant chat (app.py) ───────────────────────────────────────
+export const sendAssistantMessage = (message: string, roleId = 'default', conversationId?: string) =>
+  fetchApi('/workflows/assistant', { method: 'POST', body: JSON.stringify({ message, role_id: roleId, conversation_id: conversationId }) });
+
+// ─── Workflows CRUD + execution (workflow_routes.py) ────────────────────────
+export const getWorkflows = () => fetchApi('/workflows');
+export const createWorkflow = (data: any) => fetchApi('/workflows', { method: 'POST', body: JSON.stringify(data) });
+export const getWorkflow = (id: string) => fetchApi(`/workflows/${id}`);
+export const updateWorkflow = (id: string, data: any) => fetchApi(`/workflows/${id}`, { method: 'PUT', body: JSON.stringify(data) });
+export const deleteWorkflow = (id: string) => fetchApi(`/workflows/${id}`, { method: 'DELETE' });
+export const duplicateWorkflow = (id: string) => fetchApi(`/workflows/${id}/duplicate`, { method: 'POST' });
+export const runWorkflow = (id: string, triggerData = {}) =>
+  fetchApi(`/workflows/${id}/run`, { method: 'POST', body: JSON.stringify({ trigger_data: triggerData }) });
+export const getWorkflowRuns = (id: string) => fetchApi(`/workflows/${id}/runs`);
+export const getWorkflowRun = (id: string, runId: string) => fetchApi(`/workflows/${id}/runs/${runId}`);
+export const getNodeLibrary = () => fetchApi('/nodes');
+
+// ─── Knowledge (app.py) ──────────────────────────────────────────────────────
+export const getStats = () => fetchApi('/stats');
+export const getKnowledgeNodes = (type = 'goal') => fetchApi(`/knowledge/nodes?type=${type}`);
+export const getKnowledgeNode = (nodeId: string) => fetchApi(`/knowledge/nodes/${nodeId}`);
+export const getNodeVersions = (nodeId: string) => fetchApi(`/knowledge/nodes/${nodeId}/versions`);
+export const rollbackNodeVersion = (nodeId: string, version: number) =>
+  fetchApi(`/knowledge/nodes/${nodeId}/rollback`, { method: 'POST', body: JSON.stringify({ version }) });
+export const compactSession = (messages: any[], sessionTopic?: string) =>
+  fetchApi('/knowledge/compact', { method: 'POST', body: JSON.stringify({ messages, session_topic: sessionTopic }) });
+export const getKnowledgeContext = (message: string, mode: 'fast' | 'thinking' = 'fast') =>
+  fetchApi('/knowledge/context', { method: 'POST', body: JSON.stringify({ message, mode }) });
+
+// ─── Conversation memory (workflow_routes.py) ────────────────────────────────
+// Deletes every knowledge node/edge the AI learned from one chat — wire this
+// to a "delete chat" / "clear conversation" action in the UI.
+export const deleteConversationMemory = (conversationId: string) =>
+  fetchApi(`/conversations/${conversationId}/memory`, { method: 'DELETE' });
+
+// ─── Usage / Subscription (subscription_manager.py) ─────────────────────────
+export const getUsageSummary = () => fetchApi('/usage/summary');
+export const getPlans = () => fetchApi('/usage/plans');
+export const upgradePlan = (planId: string, paymentReference?: string) =>
+  fetchApi('/usage/upgrade', { method: 'POST', body: JSON.stringify({ plan_id: planId, payment_reference: paymentReference }) });
+export const getExecutionUsage = (executionId: string) => fetchApi(`/usage/executions/${executionId}`);
+
+// ─── Personalization (personalization.py) ───────────────────────────────────
+export const personalizationChat = (message: string) =>
+  fetchApi('/personalization/chat', { method: 'POST', body: JSON.stringify({ message }) });
+export const getPersonalizationProfile = () => fetchApi('/personalization/profile');
+export const updatePersonalizationSettings = (patch: { mode?: string; customPrompt?: string }) =>
+  fetchApi('/personalization/settings', { method: 'PUT', body: JSON.stringify(patch) });
+export const resetPersonalizationTraits = () => fetchApi('/personalization/traits', { method: 'DELETE' });
+export const getPersonalizationHistory = () => fetchApi('/personalization/history');
+export const clearPersonalizationHistory = () => fetchApi('/personalization/history', { method: 'DELETE' });
