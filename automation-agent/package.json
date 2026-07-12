@@ -1,0 +1,23 @@
+{
+  "name": "xoltra",
+  "version": "1.0.0",
+  "description": "Permissioned long-running web & app integration agent",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "dashboard": "cd dashboard && npm install && npm run dev"
+  },
+  "dependencies": {
+    "googleapis": "^140.0.0",
+    "puppeteer": "^21.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": ["agent", "automation", "ai", "gmail", "word", "browser", "codex", "antigravity"],
+  "license": "MIT"
+}
