@@ -32,7 +32,7 @@ import os
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from dataclasses import dataclass, field, asdict
-from typing import Dict, List, Any, Callable
+from typing import Dict, List, Any, Callable, Optional
 
 from permission_bridge.permission_bridge import create_permission_bridge, NodeManifest, NodeAction
 
@@ -130,10 +130,17 @@ def _get_bridge():
     return _bridge, _primitives
 
 
-def _check_permission(node_type: str, action_type: str, target: str, scope: str):
+def get_bridge():
+    """Public accessor for the shared Permission Bridge singleton (bridge, primitives)."""
+    return _get_bridge()
+
+
+def _check_permission(node_type: str, action_type: str, target: str, scope: str, user_id: Optional[str] = None):
     """
     Check a single action through the Permission Bridge.
-    Raises PermissionError if denied.
+    Raises PermissionError if denied. Pass user_id (from inputs["_user_id"],
+    injected by workflow_engine.py's RunContext) so the audit entry is
+    scoped to the tenant that ran the workflow.
     """
     bridge, _ = _get_bridge()
 
@@ -143,8 +150,8 @@ def _check_permission(node_type: str, action_type: str, target: str, scope: str)
         generated_by="user",
         permissions=[action_type],
         actions=[NodeAction(action_type=action_type, target=target, scope=scope)],
-
         safe_primitives_only=True,
+        user_id=user_id,
     )
     result = bridge.check_manifest(manifest)
     if not result.allowed:
@@ -238,7 +245,7 @@ def _exec_ai_web_search(inputs: dict, params: dict) -> dict:
 
     num_results = int(params.get("num_results", 5))
 
-    _check_permission("ai.web_search", "GET", "serpapi.com", f"https://serpapi.com/search?q={query}")
+    _check_permission("ai.web_search", "GET", "serpapi.com", f"https://serpapi.com/search?q={query}", user_id=inputs.get("_user_id"))
 
     api_key = os.environ.get("SERPAPI_API_KEY")
     if not api_key:
@@ -476,7 +483,7 @@ def _exec_integration_http_request(inputs: dict, params: dict) -> dict:
     # Permission check via bridge
     from urllib.parse import urlparse
     domain = urlparse(url).netloc
-    _check_permission("integration.http_request", method, domain, url)
+    _check_permission("integration.http_request", method, domain, url, user_id=inputs.get("_user_id"))
 
     # Execute via safe primitives
     _, primitives = _get_bridge()
@@ -512,7 +519,7 @@ def _exec_integration_send_email(inputs: dict, params: dict) -> dict:
         raise ValueError("integration.send_email requires 'subject' param or input")
 
     # Permission check
-    _check_permission("integration.send_email", "POST", host, f"smtp://{host}:{port}")
+    _check_permission("integration.send_email", "POST", host, f"smtp://{host}:{port}", user_id=inputs.get("_user_id"))
 
     msg = MIMEMultipart()
     msg["From"]    = from_addr

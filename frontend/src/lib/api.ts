@@ -21,12 +21,28 @@ function getToken() {
   try { return localStorage.getItem('xoltra_token'); } catch { return null; }
 }
 
+export function hasToken() {
+  return Boolean(getToken());
+}
+
 export function setToken(token: string) {
   try { localStorage.setItem('xoltra_token', token); } catch { /* private browsing etc — non-fatal */ }
 }
 
 export function clearToken() {
   try { localStorage.removeItem('xoltra_token'); } catch { /* noop */ }
+}
+
+/** Thrown instead of a plain Error when the account is under a ToS timeout — lets the UI show a dedicated suspended-account screen instead of a generic toast. */
+export class AccountTimeoutError extends Error {
+  timeoutUntil: string;
+  category: string;
+  constructor(message: string, timeoutUntil: string, category: string) {
+    super(message);
+    this.name = 'AccountTimeoutError';
+    this.timeoutUntil = timeoutUntil;
+    this.category = category;
+  }
 }
 
 async function tryFetch(base: string, endpoint: string, options: RequestInit) {
@@ -41,6 +57,9 @@ async function tryFetch(base: string, endpoint: string, options: RequestInit) {
     },
   });
   const data = await res.json().catch(() => ({}));
+  if (res.status === 403 && data.timeout) {
+    throw new AccountTimeoutError(data.error || 'Account temporarily suspended', data.timeout_until, data.category);
+  }
   if (!res.ok || data.success === false) {
     throw new Error(data.error || `API Error: ${res.status}`);
   }
@@ -54,10 +73,22 @@ export function onFallbackUsed(fn: FallbackListener) {
   return () => { const i = _fallbackListeners.indexOf(fn); if (i >= 0) _fallbackListeners.splice(i, 1); };
 }
 
+type TimeoutListener = (err: AccountTimeoutError) => void;
+const _timeoutListeners: TimeoutListener[] = [];
+/** Subscribe to be notified the moment any API call reveals the account is under a ToS timeout — used to show a global suspended-account screen. */
+export function onAccountTimeout(fn: TimeoutListener) {
+  _timeoutListeners.push(fn);
+  return () => { const i = _timeoutListeners.indexOf(fn); if (i >= 0) _timeoutListeners.splice(i, 1); };
+}
+
 export async function fetchApi(endpoint: string, options: RequestInit = {}) {
   try {
     return await tryFetch(PRIMARY_URL, endpoint, options);
   } catch (primaryErr) {
+    if (primaryErr instanceof AccountTimeoutError) {
+      _timeoutListeners.forEach(fn => { try { fn(primaryErr); } catch {} });
+      throw primaryErr; // account-level, not a backend-availability issue — retrying elsewhere won't help
+    }
     // Primary down or erroring — try the fallback before giving up.
     if (!FALLBACK_URL || FALLBACK_URL === PRIMARY_URL) throw primaryErr;
     try {
@@ -72,11 +103,34 @@ export async function fetchApi(endpoint: string, options: RequestInit = {}) {
 }
 
 // ─── Auth (auth.py) ─────────────────────────────────────────────────────────
-export const register = (email: string, password: string) =>
-  fetchApi('/auth/register', { method: 'POST', body: JSON.stringify({ email, password }) });
+export const register = (email: string, password: string, ref?: string) =>
+  fetchApi('/auth/register', { method: 'POST', body: JSON.stringify({ email, password, ref }) });
 export const login = (email: string, password: string) =>
   fetchApi('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) });
 export const getMe = () => fetchApi('/auth/me');
+export const getTermsConsent = () => fetchApi('/auth/terms');
+export const getReferralStats = () => fetchApi('/referrals/me');
+
+// ─── Teams/Orgs (teams.py) ───────────────────────────────────────────────────
+export const getMyOrgs = () => fetchApi('/orgs/me');
+export const getOrgMembers = (orgId: string) => fetchApi(`/orgs/${orgId}/members`);
+export const createOrgInvite = (orgId: string, role: string) =>
+  fetchApi(`/orgs/${orgId}/invites`, { method: 'POST', body: JSON.stringify({ role }) });
+export const joinOrg = (code: string) =>
+  fetchApi('/orgs/join', { method: 'POST', body: JSON.stringify({ code }) });
+export const setMemberRole = (orgId: string, userId: string, role: string) =>
+  fetchApi(`/orgs/${orgId}/members/${userId}/role`, { method: 'PATCH', body: JSON.stringify({ role }) });
+export const getOrgAuditLog = (orgId: string) => fetchApi(`/orgs/${orgId}/audit-log/export?format=json`);
+// CSV isn't JSON, so this bypasses fetchApi/tryFetch (which always calls
+// res.json()) the same way exportRunReport already does for file downloads.
+export function exportOrgAuditLogCsv(orgId: string) {
+  const token = (() => { try { return localStorage.getItem('xoltra_token'); } catch { return null; } })();
+  return fetch(`${PRIMARY_URL}/api/orgs/${orgId}/audit-log/export?format=csv`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+}
+export const setTermsConsent = (decision: 'accepted' | 'rejected') =>
+  fetchApi('/auth/terms', { method: 'PUT', body: JSON.stringify({ decision }) });
 
 // ─── Health / Roles (app.py) ────────────────────────────────────────────────
 export const getHealth = () => fetchApi('/health');
@@ -104,6 +158,18 @@ export const getBackupStatus = (adminKey: string) => adminFetch('/backup-status'
 export const getAdminHealth = (adminKey: string) => adminFetch('/health', adminKey);
 export const triggerBackupSnapshot = (adminKey: string) => adminFetch('/backup-snapshot', adminKey, { method: 'POST' });
 export const restoreBackup = (adminKey: string) => adminFetch('/restore-backup', adminKey, { method: 'POST', body: JSON.stringify({ confirm: true }) });
+
+// ─── Moderation / ToS timeouts (admin_routes.py) — requires X-Admin-Key ─────
+export const getActiveTimeouts = (adminKey: string) => adminFetch('/moderation/active', adminKey);
+export const timeoutUser = (adminKey: string, userId: string, reason: string, durationMinutes: number) =>
+  adminFetch('/moderation/timeout', adminKey, { method: 'POST', body: JSON.stringify({ user_id: userId, reason, duration_minutes: durationMinutes }) });
+export const clearUserTimeout = (adminKey: string, userId: string) =>
+  adminFetch('/moderation/clear', adminKey, { method: 'POST', body: JSON.stringify({ user_id: userId }) });
+
+// ─── Audit log (admin_routes.py) — requires X-Admin-Key ─────────────────────
+export const getAuditLog = (adminKey: string, limit = 50, userId?: string) =>
+  adminFetch(`/audit-log?limit=${limit}${userId ? `&user_id=${encodeURIComponent(userId)}` : ''}`, adminKey);
+
 export const getRoles = () => fetchApi('/roles');
 export const getRole = (roleId: string) => fetchApi(`/roles/${roleId}`);
 
@@ -175,6 +241,13 @@ export const askQuestion = (question: string, roleId = 'default') =>
 export const sendAssistantMessage = (message: string, roleId = 'default', conversationId?: string) =>
   fetchApi('/workflows/assistant', { method: 'POST', body: JSON.stringify({ message, role_id: roleId, conversation_id: conversationId }) });
 
+// ─── Workflow Import / Rebuild (workflow_import.py) ─────────────────────────
+export const parseWorkflowImport = (sourceText: string, conversationId?: string) =>
+  fetchApi('/workflows/import/parse', { method: 'POST', body: JSON.stringify({ source_text: sourceText, conversation_id: conversationId }) });
+
+export const compileImportSteps = (acceptedSteps: any[]) =>
+  fetchApi('/workflows/import/compile', { method: 'POST', body: JSON.stringify({ accepted_steps: acceptedSteps }) });
+
 // ─── Workflows CRUD + execution (workflow_routes.py) ────────────────────────
 export const getWorkflows = () => fetchApi('/workflows');
 export const createWorkflow = (data: any) => fetchApi('/workflows', { method: 'POST', body: JSON.stringify(data) });
@@ -195,12 +268,26 @@ export function exportRunReport(workflowId: string, runId: string, format: 'md' 
 }
 
 // ─── Templates (templates.py) ────────────────────────────────────────────────
-export const saveAsTemplate = (workflowId: string, name?: string) =>
-  fetchApi('/templates', { method: 'POST', body: JSON.stringify({ workflow_id: workflowId, name }) });
+export const saveAsTemplate = (workflowId: string, name?: string, category?: string) =>
+  fetchApi('/templates', { method: 'POST', body: JSON.stringify({ workflow_id: workflowId, name, category }) });
 export const getTemplates = () => fetchApi('/templates');
 export const instantiateTemplate = (templateId: string, name?: string) =>
   fetchApi(`/templates/${templateId}/instantiate`, { method: 'POST', body: JSON.stringify({ name }) });
 export const deleteTemplate = (templateId: string) => fetchApi(`/templates/${templateId}`, { method: 'DELETE' });
+
+// Marketplace v1 — publish/browse/use public templates. Requires login,
+// same as everything else (no unauthenticated public pages yet).
+export const setTemplatePublished = (templateId: string, isPublic: boolean) =>
+  fetchApi(`/templates/${templateId}/publish`, { method: 'PATCH', body: JSON.stringify({ is_public: isPublic }) });
+export const getPublicTemplates = (category?: string, q?: string) => {
+  const params = new URLSearchParams();
+  if (category) params.set('category', category);
+  if (q) params.set('q', q);
+  const qs = params.toString();
+  return fetchApi(`/templates/public${qs ? `?${qs}` : ''}`);
+};
+export const useTemplate = (templateId: string, name?: string) =>
+  fetchApi(`/templates/${templateId}/use`, { method: 'POST', body: JSON.stringify({ name }) });
 
 // ─── OneDrive cloud backup (onedrive_routes.py) — Premium/Executive ─────────
 export const getOneDriveStatus = () => fetchApi('/premium/onedrive/status');

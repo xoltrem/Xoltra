@@ -1,16 +1,19 @@
 'use client';
 import { useState, useEffect } from 'react';
-import { Workflow, Plus, Sparkles, Undo2, Redo2, Brain } from 'lucide-react';
+import { Workflow, Plus, Sparkles, Undo2, Redo2, Brain, Upload } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { AIAssistantPanel } from '@/components/workflow/AIAssistantPanel';
 import { ThinkingPanel } from '@/components/workflow/ThinkingPanel';
+import { ImportWorkflowModal } from '@/components/workflow/ImportWorkflowModal';
 import { RunHistory } from '@/components/workflow/RunHistory';
 import { TemplateGallery } from '@/components/workflow/TemplateGallery';
+import { notify } from '@/lib/notifications';
 import { useWorkflowCanvasStore } from '@/stores';
 
 export default function WorkflowsPage() {
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [thinkingOpen, setThinkingOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const { nodes, pushState, undo, redo, canUndo, canRedo } = useWorkflowCanvasStore();
 
   const handleAcceptNode = (node: any) => {
@@ -53,6 +56,15 @@ export default function WorkflowsPage() {
           <Button
             variant="outline"
             className="gap-2"
+            onClick={() => setImportOpen(true)}
+            title="Rebuild an existing Zapier/Make/n8n automation in Xoltra"
+          >
+            <Upload className="w-4 h-4 text-[var(--color-accent)]" />
+            Import
+          </Button>
+          <Button
+            variant="outline"
+            className="gap-2"
             onClick={() => setAssistantOpen(true)}
           >
             <Sparkles className="w-4 h-4 text-[var(--color-accent)]" />
@@ -78,10 +90,14 @@ export default function WorkflowsPage() {
             <Sparkles className="w-3.5 h-3.5" />
             Start with the assistant
           </Button>
+          <Button size="sm" variant="outline" onClick={() => setImportOpen(true)} className="gap-2 mt-2">
+            <Upload className="w-3.5 h-3.5" />
+            Or rebuild one you already have
+          </Button>
         </div>
       </div>
 
-      <TemplateGallery />
+      <TemplateGallery onInstantiated={() => notify('Workflow created', 'Added from your template.')} />
 
       <RunHistory />
 
@@ -91,6 +107,7 @@ export default function WorkflowsPage() {
         onAcceptNode={handleAcceptNode}
       />
       <ThinkingPanel open={thinkingOpen} onClose={() => setThinkingOpen(false)} />
+      <ImportWorkflowModal open={importOpen} onClose={() => setImportOpen(false)} />
     </div>
   );
 }

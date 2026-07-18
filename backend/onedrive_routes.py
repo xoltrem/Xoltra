@@ -26,6 +26,7 @@ import knowledge_db as kdb
 import workflow_store
 from auth import require_auth, get_current_user_id
 import subscription_manager as sm
+import crypto_utils
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +125,8 @@ def callback():
             ON CONFLICT(user_id) DO UPDATE SET
                 access_token=excluded.access_token, refresh_token=excluded.refresh_token,
                 expires_at=excluded.expires_at
-        """, (user_id, tok["access_token"], tok.get("refresh_token", ""),
+        """, (user_id, crypto_utils.encrypt_secret(tok["access_token"]),
+              crypto_utils.encrypt_secret(tok.get("refresh_token", "")),
               str(datetime.now(timezone.utc).timestamp() + tok.get("expires_in", 3600)),
               datetime.now(timezone.utc).isoformat()))
         conn.commit()
@@ -144,19 +146,23 @@ def _get_valid_token(user_id: str):
     if not row:
         return None
 
+    access_token = crypto_utils.decrypt_secret(row["access_token"])
+    refresh_token = crypto_utils.decrypt_secret(row["refresh_token"])
+
     if float(row["expires_at"]) > datetime.now(timezone.utc).timestamp() + 60:
-        return row["access_token"]
+        return access_token
 
     # Refresh
     resp = requests.post(TOKEN_URL, data={
         "client_id": MS_CLIENT_ID, "client_secret": MS_CLIENT_SECRET,
-        "refresh_token": row["refresh_token"], "grant_type": "refresh_token", "scope": MS_SCOPES,
+        "refresh_token": refresh_token, "grant_type": "refresh_token", "scope": MS_SCOPES,
     }, timeout=10)
     resp.raise_for_status()
     tok = resp.json()
     cursor.execute(
         "UPDATE onedrive_tokens SET access_token=?, expires_at=? WHERE user_id=?",
-        (tok["access_token"], str(datetime.now(timezone.utc).timestamp() + tok.get("expires_in", 3600)), user_id)
+        (crypto_utils.encrypt_secret(tok["access_token"]),
+         str(datetime.now(timezone.utc).timestamp() + tok.get("expires_in", 3600)), user_id)
     )
     conn.commit()
     return tok["access_token"]

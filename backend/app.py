@@ -31,7 +31,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app, origins=["http://localhost:3000", "http://localhost:5173"])
+_cors_origins = os.getenv("FRONTEND_URLS", "http://localhost:3000,http://localhost:5173").split(",")
+CORS(app, origins=[o.strip() for o in _cors_origins if o.strip()])
 
 kdb.init_storage()
 
@@ -39,10 +40,13 @@ import unity_bridge
 from simulation_routes import register_simulation_routes
 from workflow_routes import register_workflow_routes
 from auth import auth_bp, init_auth_tables, require_auth, get_current_user_id
+from rate_limit import rate_limit_user
 from subscription_manager import subscription_bp, init_subs_tables
 from personalization import personalization_bp, init_personalization_tables
 
 from workflow_assistant import handle_assistant_message
+import workflow_import
+from digest import register_digest_routes
 
 app.register_blueprint(auth_bp)
 app.register_blueprint(subscription_bp)
@@ -65,8 +69,16 @@ register_admin_routes(app)
 from templates import register_template_routes
 register_template_routes(app)
 
+from referrals import register_referral_routes
+register_referral_routes(app)
+
+from teams import register_team_routes
+register_team_routes(app)
+
 from onedrive_routes import register_onedrive_routes
 register_onedrive_routes(app)
+
+register_digest_routes(app)
 
 pipeline = get_pipeline()
 
@@ -134,6 +146,7 @@ def clarify():
 
 @app.route("/api/run", methods=["POST"])
 @require_auth
+@rate_limit_user(20, 60, category="ai_flood")
 def run_goal():
     user_id    = get_current_user_id()
     body       = request.get_json(silent=True) or {}
@@ -169,6 +182,7 @@ def run_goal():
 
 @app.route("/api/run/stream", methods=["POST"])
 @require_auth
+@rate_limit_user(20, 60, category="ai_flood")
 def run_goal_stream():
     """
     Same as /api/run, but streams each pipeline stage (Router, Clarifier,
@@ -326,6 +340,7 @@ def upload_document():
 
 @app.route("/api/qa", methods=["POST"])
 @require_auth
+@rate_limit_user(30, 60, category="ai_flood")
 def qa():
     user_id  = get_current_user_id()
     body     = request.get_json(silent=True) or {}
@@ -347,6 +362,7 @@ def qa():
 
 @app.route("/api/workflows/assistant", methods=["POST"])
 @require_auth
+@rate_limit_user(30, 60, category="ai_flood")
 def workflow_assistant_route():
     """Powers the 'Create Workflow' chat panel — proposes one node per turn for review."""
     user_id         = get_current_user_id()
@@ -366,6 +382,56 @@ def workflow_assistant_route():
     except Exception as e:
         logger.error(f"[/api/workflows/assistant] {e}\n{traceback.format_exc()}")
         return _err(f"Assistant failed: {e}", 500)
+
+
+@app.route("/api/workflows/import/parse", methods=["POST"])
+@require_auth
+@rate_limit_user(10, 60, category="ai_flood")
+def workflow_import_parse_route():
+    """
+    Powers the 'Rebuild your existing automation' onboarding flow. Takes a
+    pasted n8n/Make export or a plain description and proposes an ordered
+    set of Xoltra nodes — review-only, nothing is saved here.
+    """
+    user_id         = get_current_user_id()
+    body            = request.get_json(silent=True) or {}
+    source_text     = body.get("source_text") or ""
+    conversation_id = body.get("conversation_id")
+
+    if not source_text.strip():
+        return _err("source_text is required")
+
+    try:
+        result = workflow_import.parse_import(user_id, source_text, conversation_id=conversation_id)
+        return _ok(result)
+    except ValueError as e:
+        return _err(str(e))
+    except Exception as e:
+        logger.error(f"[/api/workflows/import/parse] {e}\n{traceback.format_exc()}")
+        return _err(f"Import failed: {e}", 500)
+
+
+@app.route("/api/workflows/import/compile", methods=["POST"])
+@require_auth
+def workflow_import_compile_route():
+    """
+    Turns the steps the user actually accepted (after reviewing
+    /import/parse's output) into a runnable {nodes, edges} graph. Kept
+    deterministic and server-side rather than duplicated in the frontend —
+    see workflow_import.py's module docstring for why.
+    """
+    body = request.get_json(silent=True) or {}
+    accepted_steps = body.get("accepted_steps")
+
+    if not isinstance(accepted_steps, list) or not accepted_steps:
+        return _err("accepted_steps must be a non-empty list")
+
+    try:
+        graph = workflow_import.compile_steps_to_graph(accepted_steps)
+        return _ok({"graph": graph})
+    except Exception as e:
+        logger.error(f"[/api/workflows/import/compile] {e}\n{traceback.format_exc()}")
+        return _err(f"Compile failed: {e}", 500)
 
 
 @app.route("/api/stats", methods=["GET"])

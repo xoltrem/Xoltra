@@ -1,11 +1,12 @@
 'use client';
-import { useSystemStore } from '@/stores';
+import { useSystemStore, useTermsStore } from '@/stores';
 import { Play, Pause, Square, AlertCircle, Bell } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { agentAction } from '@/lib/api';
 import { NotifyToggle } from '@/components/ui/NotifyToggle';
 export function Topbar() {
   const { status } = useSystemStore();
+  const termsStatus = useTermsStore((state) => state.status);
   
   const agentState = status?.status || 'OFFLINE';
   
@@ -32,6 +33,9 @@ export function Topbar() {
         {/* Breadcrumb or context title can go here */}
       </div>
       <div className="flex items-center gap-3">
+        {termsStatus === 'rejected' ? (
+          <span className="text-xs text-[var(--color-text-secondary)]">Limited access until Terms are accepted</span>
+        ) : <>
         {/* Agent Controls */}
         <div className="flex items-center bg-[#151515] border border-[var(--color-border-main)] rounded-[var(--radius-global)] p-1 gap-1">
           <div className="flex items-center gap-2 px-3 border-r border-[var(--color-border-main)]">
@@ -105,6 +109,7 @@ export function Topbar() {
             </div>
           </div>
         </div>
+        </>}
       </div>
     </header>
   );

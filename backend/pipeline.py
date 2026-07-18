@@ -19,7 +19,8 @@ from typing import Optional, Callable
 from agents import (
     RouterAgent, ClarifierAgent, ArchitectAgent,
     CriticAgent, OperatorAgent, AuditorAgent,
-    ValidatorAgent, CompilerAgent, PDFExtractorAgent, QAAgent
+    ValidatorAgent, CompilerAgent, PDFExtractorAgent, QAAgent,
+    CoachAgent, CodingAgent
 )
 from roles import get_role_preamble
 from llm import apply_tier, is_agent_active, get_active_tier
@@ -83,6 +84,8 @@ class WorkflowPipeline:
         self.compiler  = CompilerAgent()
         self.extractor = PDFExtractorAgent()
         self.qa        = QAAgent()
+        self.coach     = CoachAgent()
+        self.coding    = CodingAgent()
 
         self.knowledge_enabled = KNOWLEDGE_AVAILABLE
         if self.knowledge_enabled:
@@ -249,6 +252,25 @@ class WorkflowPipeline:
             logger.info(f"[Pipeline] {name}")
             if on_step: on_step(name)
 
+        if mode == "coach":
+            step("Coach")
+            try:
+                answer = self.coach.run(
+                    user_id, user_input, role_preamble=preamble
+                )
+                return {
+                    "success":    True,
+                    "output":     answer,
+                    "mode":       mode,
+                    "role_id":    role_id,
+                    "complexity": complexity,
+                    "tier":       get_active_tier()["label"],
+                    "agents_used": ["router", "coach"],
+                    "error":      None,
+                }
+            except Exception as e:
+                return _error_result(f"Coach failed: {e}", mode, role_id, complexity)
+
         # ⚡ Fast + ⚖ Standard → QA agent only for adaptive
         if complexity in ("simple", "medium"):
             step("QA")
@@ -295,6 +317,23 @@ class WorkflowPipeline:
             llm.set_usage_context(execution_id=thread_id)
 
         result = _base_result(mode, role_id, complexity)
+
+        if mode == "coach":
+            step("Coach")
+            result["agents_used"].append("Coach")
+            try:
+                answer = self.coach.run(user_id, goal, role_preamble=role_preamble)
+                result["output"] = answer
+                result["success"] = True
+                if thread_id:
+                    import memory_router
+                    memory_router.complete_session(thread_id)
+                return result
+            except Exception as e:
+                if thread_id:
+                    import memory_router
+                    memory_router.complete_session(thread_id)
+                return _error_result(f"Coach failed: {e}", mode, role_id, complexity)
 
         try:
             # ─── KNOWLEDGE (Deep tier only) ───────────────

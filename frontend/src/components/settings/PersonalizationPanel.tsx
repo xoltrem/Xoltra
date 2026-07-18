@@ -22,7 +22,7 @@ export function PersonalizationPanel() {
   useEffect(() => {
     xoltra.init();
     setCustomPrompt(xoltra.getSettings().customPrompt || '');
-    return xoltra.onChange((s) => setState(s));
+    return xoltra.onChange((s: ReturnType<typeof xoltra.getState>) => setState(s));
   }, []);
 
   const setMode = async (mode: string) => {

@@ -1,5 +1,5 @@
 """
-agents.py — XoltaOS Agent Definitions
+agents.py — Xolta Agent Definitions
 
 Every agent:
 - Receives original_goal where relevant so context is never lost
@@ -24,6 +24,7 @@ from llm import (
     call_auditor, call_validator, call_compiler,
     call_qa, call_knowledge_retriever, call_knowledge_linker,
     call_insight_generator, call_deduplicator,
+    call_coding, call_coach,
 )
 
 logger = logging.getLogger(__name__)
@@ -335,29 +336,7 @@ class CompilerAgent:
         role_preamble: Optional[str] = None
     ) -> str:
 
-        if mode == "coach":
-            style = """
-You are writing a TEACHING document. Help the user understand execution deeply.
-
-For each phase and step:
-- Explain the underlying principle, not just the action
-- Include a reflective question that makes them think about WHY this matters
-- Highlight what most people get wrong at this stage
-- Give a mental model or framework they can reuse
-
-Structure:
-## WHAT YOU'RE BUILDING AND WHY
-## KEY CONCEPTS TO MASTER FIRST
-## PHASE WALKTHROUGH
-### Phase [N]: [Name]
-  For each step: teach the principle, ask the reflective question, name the common mistake.
-## WHAT MOST PEOPLE GET WRONG
-## YOUR NEXT QUESTION TO ANSWER
-
-700-1000 words. Paragraphs only. Second person throughout.
-"""
-        else:
-            style = """
+        style = """
 You are writing a direct, rich execution document.
 - DIRECT: lead with what matters, no filler, no preamble
 - DETAILED: full strategic depth, explain the WHY, concrete specifics
@@ -434,20 +413,7 @@ class QAAgent:
             "complex": "4-6 paragraphs with clear structure"
         }.get(complexity, "2-3 paragraphs")
 
-        if mode == "coach":
-            return call_qa( f"""
-You are a world-class coach. Help the user understand — never just give the answer.
-
-- Break down the key concepts they need
-- Ask guiding questions that lead toward the answer
-- Give frameworks and mental models they can reuse
-- End with one question that pushes them to think deeper
-- Second person. Length: {length}
-
-Question: {question}
-""", role_preamble=role_preamble)
-        else:
-            return call_qa( f"""
+        return call_qa( f"""
 You are a direct, expert responder. Two qualities combined: direct AND detailed.
 
 - Lead with the answer immediately — no preamble
@@ -459,6 +425,55 @@ You are a direct, expert responder. Two qualities combined: direct AND detailed.
 - Length: {length}. Second person where natural.
 
 Question: {question}
+""", role_preamble=role_preamble)
+
+
+# ═══════════════════════════════════════════════════
+# COACH AGENT
+# ═══════════════════════════════════════════════════
+
+class CoachAgent:
+
+    def run(
+        self,
+        user_id: str,
+        goal: str,
+        role_preamble: Optional[str] = None
+    ) -> str:
+        return call_coach( f"""
+You are a world-class Executive Coach. Help the user understand — never just give the answer.
+
+- Break down the key concepts they need
+- Ask guiding questions that lead toward the answer
+- Give frameworks and mental models they can reuse
+- End with one question that pushes them to think deeper
+- Second person. Length: 4-6 paragraphs.
+
+Goal/Question: {goal}
+""", role_preamble=role_preamble)
+
+
+# ═══════════════════════════════════════════════════
+# CODING AGENT
+# ═══════════════════════════════════════════════════
+
+class CodingAgent:
+
+    def run(
+        self,
+        user_id: str,
+        goal: str,
+        role_preamble: Optional[str] = None
+    ) -> str:
+        return call_coding( f"""
+You are a master Coding Agent with expertise in every programming language.
+
+Write high-quality, efficient, and well-structured code. 
+- Lead with the code immediately
+- Provide brief, clear explanations for complex parts
+- Ensure all features work as intended
+
+Goal: {goal}
 """, role_preamble=role_preamble)
 
 

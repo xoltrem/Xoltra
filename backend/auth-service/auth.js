@@ -80,9 +80,9 @@ function blockDisposableEmail(req, res, next) {
 }
 
 // ── OTP helpers ──
-async function generateOTP(email) {
+async function generateOTP(email, refCode) {
   const otp = crypto.randomInt(100000, 999999).toString();
-  await redis.set(`otp:${email}`, JSON.stringify({ otp, attempts: 0 }), { ex: OTP_TTL });
+  await redis.set(`otp:${email}`, JSON.stringify({ otp, attempts: 0, ref: refCode || null }), { ex: OTP_TTL });
   return otp;
 }
 
@@ -148,7 +148,7 @@ router.post('/google',
   checkDeviceFingerprint,
   async (req, res) => {
     try {
-      const otp = await generateOTP(req.googleEmail);
+      const otp = await generateOTP(req.googleEmail, req.body?.ref);
       await sendOTPEmail(req.googleEmail, otp);
       res.json({ email: req.googleEmail, message: 'OTP sent.' });
     } catch (err) {
@@ -193,6 +193,7 @@ router.post('/verify-otp', rateLimitByIP(10, 60), async (req, res) => {
     const { data } = await axios.post(`${FLASK_API_URL}/api/auth/oauth-issue`, {
       email: email.toLowerCase(),
       source: 'google_oauth',
+      ref: record.ref || undefined,
     }, {
       timeout: 5000,
       headers: { 'X-Internal-Key': process.env.INTERNAL_SERVICE_KEY || 'dev-internal-key-do-not-use-in-prod' },

@@ -15,17 +15,17 @@ import {
   CreditCard
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { useSystemStore, useUIStore } from '@/stores';
+import { useTermsStore, useUIStore } from '@/stores';
 
 const NAV_ITEMS = [
-  { label: 'Dashboard', icon: Activity, href: '/' },
-  { label: 'Workflows', icon: Workflow, href: '/workflows' },
-  { label: 'Templates', icon: LayoutTemplate, href: '/templates' },
-  { label: 'Tools & Plugins', icon: Wrench, href: '/tools' },
-  { label: 'Agents', icon: Users, href: '/agents' },
-  { label: 'Knowledge', icon: BookOpen, href: '/knowledge' },
-  { label: 'Executions', icon: Activity, href: '/executions' },
-  { label: 'Audit Logs', icon: ShieldAlert, href: '/audit' },
+  { label: 'Dashboard', icon: Activity, href: '/workflows', requiresConsent: true },
+  { label: 'Workflows', icon: Workflow, href: '/workflows', requiresConsent: true },
+  { label: 'Templates', icon: LayoutTemplate, href: '/templates', requiresConsent: true },
+  { label: 'Tools & Plugins', icon: Wrench, href: '/tools', requiresConsent: true },
+  { label: 'Agents', icon: Users, href: '/agents', requiresConsent: true },
+  { label: 'Knowledge', icon: BookOpen, href: '/knowledge', requiresConsent: true },
+  { label: 'Executions', icon: Activity, href: '/executions', requiresConsent: true },
+  { label: 'Audit Logs', icon: ShieldAlert, href: '/audit', requiresConsent: true },
   { label: 'Pricing', icon: CreditCard, href: '/pricing' },
 ];
 
@@ -35,8 +35,8 @@ const BOTTOM_ITEMS = [
 
 export function Sidebar() {
   const pathname = usePathname();
-  const { status } = useSystemStore();
   const { setSearchOpen } = useUIStore();
+  const termsStatus = useTermsStore((state) => state.status);
   const unityConnected = false; // TODO: Wire to real unity connection status once backend simulation engine is attached
 
   return (
@@ -62,7 +62,7 @@ export function Sidebar() {
       </div>
 
       <nav className="flex-1 overflow-y-auto p-3 pt-0 space-y-1">
-        {NAV_ITEMS.map((item) => {
+        {NAV_ITEMS.filter((item) => !item.requiresConsent || termsStatus === 'accepted').map((item) => {
           const isActive = pathname === item.href || pathname.startsWith(`${item.href}/`);
           return (
             <Link

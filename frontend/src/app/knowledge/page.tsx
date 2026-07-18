@@ -5,19 +5,21 @@ import { cn } from '@/lib/utils';
 import { fetchApi, getKnowledgeNodes, getNodeVersions, rollbackNodeVersion } from '@/lib/api';
 
 interface UsageSummary {
-  plan_id: 'free_trial' | 'basic' | 'premium' | 'executive';
+  plan_id: 'free_trial' | 'basic' | 'premium' | 'max';
   plan_label: string;
-  pay_as_you_go: boolean;
+  price_cents: number;
+  overage_allowed: boolean;
   tokens_used: number;
   tokens_limit: number | null;
   tokens_remaining: number | null;
   executions_used: number;
   executions_limit: number | null;
   executions_remaining: number | null;
-  cost_per_million_tokens?: number;
-  estimated_cost?: number;
+  overage_tokens: number;
+  overage_cost_cents: number;
   trial_ends_at?: string;
-  usage_warning?: { level: 'warning' | 'critical'; pct: number; message: string } | null;
+  payment_verified?: boolean;
+  usage_warning?: { level: 'warning' | 'critical' | 'overage'; pct: number; message: string } | null;
 }
 
 const getUsageSummary = () => fetchApi('/usage/summary');
@@ -238,43 +240,41 @@ export default function KnowledgePage() {
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <StatCard icon={Zap} label="Tokens This Month">
+        <StatCard icon={Zap} label="Tokens This Week">
           <UsageBar used={stats.tokens_used} limit={stats.tokens_limit} />
         </StatCard>
-        <StatCard icon={Calendar} label="Executions This Month">
+        <StatCard icon={Calendar} label="Executions This Week">
           <UsageBar used={stats.executions_used} limit={stats.executions_limit} />
         </StatCard>
       </div>
 
-      {stats.pay_as_you_go ? (
-        <StatCard icon={CreditCard} label="Billing Estimate">
+      {stats.overage_tokens > 0 ? (
+        <StatCard icon={CreditCard} label="Overage This Week (pay-as-you-go, not yet billed)">
           <div className="flex items-baseline justify-between">
             <div>
               <div className="text-2xl font-mono font-semibold text-[var(--color-text-primary)]">
-                ${(stats.estimated_cost ?? 0).toFixed(2)}
+                ${(stats.overage_cost_cents / 100).toFixed(2)}
               </div>
-              <div className="text-xs text-[var(--color-text-secondary)] mt-1">Estimated for this billing period</div>
+              <div className="text-xs text-[var(--color-text-secondary)] mt-1">Tracked only — billing isn't connected yet</div>
             </div>
             <div className="text-right">
-              <div className="text-xs font-mono text-[var(--color-text-secondary)]">{stats.tokens_used.toLocaleString()} tokens used</div>
-              <div className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">${(stats.cost_per_million_tokens ?? 0).toFixed(2)} / 1M tokens</div>
+              <div className="text-xs font-mono text-[var(--color-text-secondary)]">{stats.overage_tokens.toLocaleString()} overage tokens</div>
             </div>
           </div>
         </StatCard>
-      ) : (
+      ) : !stats.overage_allowed ? (
         <div className="p-4 border border-dashed border-[var(--color-border-main)] rounded-[var(--radius-global)] flex items-center justify-between">
           <div>
             <div className="text-sm font-medium text-[var(--color-text-primary)] flex items-center gap-1.5">
               <TrendingUp className="w-3.5 h-3.5 text-[var(--color-accent)]" /> Need higher limits?
             </div>
             <p className="text-xs text-[var(--color-text-secondary)] mt-1">
-              {stats.plan_id === 'free_trial' && "Upgrade to Basic or Premium for higher monthly limits."}
-              {stats.plan_id === 'basic' && "Upgrade to Premium for full feature access and higher limits."}
-              {stats.plan_id === 'premium' && "Switch to Executive for unmetered, pay-as-you-go usage."}
+              {stats.plan_id === 'free_trial' && "Upgrade to Basic, Premium, or Max for higher weekly limits."}
+              {stats.plan_id === 'basic' && "Upgrade to Premium or Max for full agent access and pay-as-you-go overage."}
             </p>
           </div>
         </div>
-      )}
+      ) : null}
 
       {stats.trial_ends_at && stats.plan_id === 'free_trial' && (
         <p className="text-xs text-[var(--color-text-secondary)]">Trial ends {new Date(stats.trial_ends_at).toLocaleDateString()}</p>

@@ -126,7 +126,8 @@ _LIGHT_AGENTS = {
 }
 _HEAVY_AGENTS = {
     "architect", "operator", "compiler", "extractor",
-    "qa", "knowledge_linker", "insight_generator"
+    "qa", "knowledge_linker", "insight_generator",
+    "coding", "coach"
 }
 
 # Current active tier — set by apply_tier()
@@ -152,6 +153,8 @@ _AGENT_TEMPERATURES = {
     "knowledge_linker":    0.2,
     "insight_generator":   0.3,
     "deduplicator":        0.0,
+    "coding":              0.2,
+    "coach":               0.4,
 }
 
 _DEFAULT_ROUTING: Dict[str, Dict] = {
@@ -168,7 +171,7 @@ _DEFAULT_ROUTING: Dict[str, Dict] = {
 
 MODEL_ROUTING: Dict[str, Dict] = {k: dict(v) for k, v in _DEFAULT_ROUTING.items()}
 
-PROSE_ROLES = {"compiler", "extractor", "qa", "knowledge_linker", "insight_generator"}
+PROSE_ROLES = {"compiler", "extractor", "qa", "knowledge_linker", "insight_generator", "coach", "coding"}
 
 
 # ═══════════════════════════════════════════════════
@@ -447,6 +450,12 @@ def call_qa(prompt: str, role_preamble: Optional[str] = None) -> str:
 
 def call_knowledge_retriever(prompt: str, role_preamble: Optional[str] = None) -> str:
     return call_llm("knowledge_retriever", prompt, role_preamble=role_preamble)
+
+def call_coding(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("coding", prompt, role_preamble=role_preamble)
+
+def call_coach(prompt: str, role_preamble: Optional[str] = None) -> str:
+    return call_llm("coach", prompt, role_preamble=role_preamble)
 
 def call_knowledge_linker(prompt: str, role_preamble: Optional[str] = None) -> str:
     return call_llm("knowledge_linker", prompt, role_preamble=role_preamble)

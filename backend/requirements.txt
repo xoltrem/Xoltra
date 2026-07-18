@@ -9,3 +9,4 @@ upstash-redis
 boto3
 apscheduler
 reportlab
+cryptography

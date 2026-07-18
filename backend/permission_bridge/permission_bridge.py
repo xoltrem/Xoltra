@@ -40,6 +40,7 @@ class NodeManifest:
     safe_primitives_only: bool = True
     sandbox_validated: bool = False
     code: Optional[str] = None     # AI-generated code to sandbox-check
+    user_id: Optional[str] = None  # tenant executing this node, for audit scoping
 
 
 @dataclass
@@ -162,10 +163,12 @@ class AuditLog:
         node_name: str,
         action: NodeAction,
         outcome: str,       # "allowed" | "blocked" | "consent_required" | "sandbox_failed"
-        reason: str
+        reason: str,
+        user_id: Optional[str] = None
     ):
         entry = {
             "timestamp":  datetime.now(timezone.utc).isoformat(),
+            "user_id":    user_id,
             "node_id":    node_id,
             "node_name":  node_name,
             "action":     f"{action.action_type} → {action.target} ({action.scope})",
@@ -177,14 +180,25 @@ class AuditLog:
         # Human-readable log line
         line = (
             f"[{entry['timestamp']}] [{outcome.upper()}] "
-            f"Node '{node_name}' attempted {entry['action']} — {reason}"
+            f"user={user_id or 'unknown'} Node '{node_name}' attempted {entry['action']} — {reason}"
         )
         logger.info(line)
         with open(self.log_path, "a") as f:
             f.write(line + "\n")
 
-    def get_recent(self, n: int = 20) -> list[dict]:
-        return self._entries[-n:]
+    def get_recent(self, n: int = 20, user_id: Optional[str] = None, user_ids: Optional[set] = None) -> list[dict]:
+        """
+        Most recent entries, newest last. Pass user_id to scope to one
+        tenant, or user_ids (a set) to scope to every member of an org.
+        Entries recorded before per-tenant auditing existed have
+        user_id=None and are excluded from any scoped query.
+        """
+        entries = self._entries
+        if user_ids is not None:
+            entries = [e for e in entries if e.get("user_id") in user_ids]
+        elif user_id is not None:
+            entries = [e for e in entries if e.get("user_id") == user_id]
+        return entries[-n:]
 
 
 # ═══════════════════════════════════════════════════
@@ -307,7 +321,8 @@ class PermissionBridge:
                 blocked.append(f"{action.action_type} → {action.target}: {reason}")
                 self.audit_log.record(
                     manifest.node_id, manifest.node_name,
-                    action, "consent_required", reason
+                    action, "consent_required", reason,
+                    user_id=manifest.user_id
                 )
 
         if blocked:
@@ -326,7 +341,8 @@ class PermissionBridge:
                     for action in manifest.actions:
                         self.audit_log.record(
                             manifest.node_id, manifest.node_name,
-                            action, "sandbox_failed", reason
+                            action, "sandbox_failed", reason,
+                            user_id=manifest.user_id
                         )
                     return InterceptResult(
                         allowed=False,
@@ -338,7 +354,8 @@ class PermissionBridge:
         for action in manifest.actions:
             self.audit_log.record(
                 manifest.node_id, manifest.node_name,
-                action, "allowed", "Within approved scope"
+                action, "allowed", "Within approved scope",
+                user_id=manifest.user_id
             )
 
         return InterceptResult(
@@ -422,8 +439,8 @@ class PermissionBridge:
         self._session_consents[node_id].extend(blocked_actions)
         logger.info(f"[Bridge] Session consent granted for node {node_id[:8]}")
 
-    def get_audit_log(self, n: int = 20) -> list[dict]:
-        return self.audit_log.get_recent(n)
+    def get_audit_log(self, n: int = 20, user_id: Optional[str] = None, user_ids: Optional[set] = None) -> list[dict]:
+        return self.audit_log.get_recent(n, user_id=user_id, user_ids=user_ids)
 
 
 # ═══════════════════════════════════════════════════

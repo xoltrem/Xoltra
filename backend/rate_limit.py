@@ -84,3 +84,48 @@ def rate_limit(limit: int, window_seconds: int = 60):
             return fn(*args, **kwargs)
         return wrapped
     return decorator
+
+
+def rate_limit_user(limit: int, window_seconds: int = 60, category: str = "flood"):
+    """
+    Same as rate_limit(), but keyed per authenticated user_id instead of IP
+    (use on @require_auth routes, after it in the decorator stack), and
+    every time the limit is exceeded it also records a ToS violation via
+    moderation.record_violation() — repeated flooding of an AI-cost-incurring
+    endpoint escalates into an actual account timeout, not just a 429.
+    """
+    def decorator(fn):
+        @wraps(fn)
+        def wrapped(*args, **kwargs):
+            try:
+                from auth import get_current_user_id
+                user_id = get_current_user_id() or "anonymous"
+                key = f"ratelimit:user:{request.path}:{user_id}"
+
+                if _redis is not None:
+                    count = _redis.incr(key)
+                    if count == 1:
+                        _redis.expire(key, window_seconds)
+                else:
+                    count = _incr_local(key, window_seconds)
+
+                if count > limit:
+                    try:
+                        import moderation
+                        moderation.record_violation(
+                            user_id, category=category,
+                            detail=f"exceeded {limit}/{window_seconds}s on {request.path}",
+                        )
+                    except Exception as e:
+                        logger.warning(f"[RateLimit] violation recording failed: {e}")
+
+                    return jsonify({
+                        "success": False,
+                        "error": "Too many requests. Repeated abuse of this endpoint may result in a temporary account timeout.",
+                    }), 429
+            except Exception as e:
+                logger.warning(f"[RateLimit] user limiter failed, allowing request through: {e}")
+
+            return fn(*args, **kwargs)
+        return wrapped
+    return decorator

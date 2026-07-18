@@ -32,6 +32,20 @@ export const useSystemStore = create<SystemState>((set) => ({
   }
 }));
 
+export type TermsStatus = 'loading' | 'pending' | 'accepted' | 'rejected' | 'unavailable';
+interface TermsState {
+  status: TermsStatus;
+  modalOpen: boolean;
+  setStatus: (status: TermsStatus) => void;
+  setModalOpen: (open: boolean) => void;
+}
+export const useTermsStore = create<TermsState>((set) => ({
+  status: 'loading',
+  modalOpen: false,
+  setStatus: (status) => set({ status }),
+  setModalOpen: (modalOpen) => set({ modalOpen }),
+}));
+
 // ─── Workflow canvas undo/redo ───────────────────────────────────────────────
 // Generic history store for the React Flow canvas (nodes/edges). Separate
 // from node_versions (backend, rolls back ONE knowledge node's content) —

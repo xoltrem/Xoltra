@@ -21,8 +21,8 @@ async function post(path: string, body: object) {
 }
 
 /** Step 1: Google access token + Turnstile token -> sends an OTP email. */
-export const startGoogleLogin = (accessToken: string, turnstileToken: string, fingerprint: string) =>
-  post('/google', { accessToken, turnstileToken, fingerprint });
+export const startGoogleLogin = (accessToken: string, turnstileToken: string, fingerprint: string, ref?: string) =>
+  post('/google', { accessToken, turnstileToken, fingerprint, ref });
 
 /** Step 2: the code from that email -> a real Flask JWT, ready for xoltra_token. */
 export const verifyOtp = (email: string, otp: string) =>

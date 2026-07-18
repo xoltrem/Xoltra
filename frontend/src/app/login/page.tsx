@@ -1,9 +1,22 @@
 'use client';
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
+import { useState, useEffect, useRef, useCallback, Suspense } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { Loader2, Mail, Lock } from 'lucide-react';
-import { register, login, setToken } from '@/lib/api';
+import { register, login, setToken, setTermsConsent, joinOrg } from '@/lib/api';
 import { startGoogleLogin, verifyOtp, getDeviceFingerprint } from '@/lib/authService';
+import { TermsPreviewModal } from '@/components/auth/TermsPreviewModal';
+
+/** Redeems an org invite code stashed by /join before sending someone here
+ *  to log in or sign up first. Best-effort — a failed redemption shouldn't
+ *  block the person from reaching the app. */
+async function redeemPendingInvite() {
+  try {
+    const code = sessionStorage.getItem('xoltra_pending_invite');
+    if (!code) return;
+    sessionStorage.removeItem('xoltra_pending_invite');
+    await joinOrg(code);
+  } catch { /* invite may be invalid/expired — not fatal */ }
+}
 
 declare global {
   interface Window {
@@ -14,8 +27,10 @@ declare global {
 
 type Mode = 'password' | 'google-otp';
 
-export default function LoginPage() {
+function LoginPageInner() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const refCode = searchParams.get('ref') || undefined;
   const [tab, setTab] = useState<'signin' | 'signup'>('signin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -25,6 +40,8 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [googleReady, setGoogleReady] = useState(false);
+  const [agreed, setAgreed] = useState(false);
+  const [legalTab, setLegalTab] = useState<'tos' | 'privacy' | null>(null);
 
   const turnstileWidgetId = useRef<string | null>(null);
   const turnstileTokenRef = useRef<string>('');
@@ -74,7 +91,7 @@ export default function LoginPage() {
         }
         try {
           const fingerprint = getDeviceFingerprint();
-          const result = await startGoogleLogin(resp.access_token, turnstileTokenRef.current, fingerprint);
+          const result = await startGoogleLogin(resp.access_token, turnstileTokenRef.current, fingerprint, refCode);
           setPendingEmail(result.email);
           setMode('google-otp');
         } catch (e: any) {
@@ -87,6 +104,10 @@ export default function LoginPage() {
   }, [googleReady, googleClientId]);
 
   const handleGoogleClick = useCallback(() => {
+    if (!agreed) {
+      setError('Please agree to the Terms of Service and Privacy Notice first.');
+      return;
+    }
     if (!tokenClientRef.current) {
       setError('Google sign-in is still loading — try again in a moment.');
       return;
@@ -98,16 +119,27 @@ export default function LoginPage() {
     setError('');
     setLoading(true);
     tokenClientRef.current.requestAccessToken();
-  }, [turnstileSiteKey]);
+  }, [turnstileSiteKey, agreed]);
 
   const handlePasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!agreed) {
+      setError('Please agree to the Terms of Service and Privacy Notice first.');
+      return;
+    }
     setError('');
     setLoading(true);
     try {
-      const result = tab === 'signup' ? await register(email, password) : await login(email, password);
+      const result = tab === 'signup' ? await register(email, password, refCode) : await login(email, password);
       setToken(result.token);
-      router.push('/');
+      await redeemPendingInvite();
+      // The checkbox above already required explicit agreement before this
+      // form could even submit — record that now so the full-screen ToS
+      // gate on the next page doesn't immediately re-block them with the
+      // same question. Best-effort: if this fails, the gate is still the
+      // real enforcement point and will just ask again.
+      try { await setTermsConsent('accepted'); } catch { /* gate will catch it */ }
+      router.push('/pricing');
     } catch (e: any) {
       setError(e.message || 'Something went wrong.');
     } finally {
@@ -122,7 +154,9 @@ export default function LoginPage() {
     try {
       const result = await verifyOtp(pendingEmail, otp);
       setToken(result.token);
-      router.push('/');
+      await redeemPendingInvite();
+      try { await setTermsConsent('accepted'); } catch { /* gate will catch it */ }
+      router.push('/pricing');
     } catch (e: any) {
       setError(e.message || 'Invalid or expired code.');
     } finally {
@@ -178,9 +212,27 @@ export default function LoginPage() {
                   className="w-full bg-[var(--color-panel-200)] border border-[var(--color-border-main)] rounded-[var(--radius-global)] pl-9 pr-3 py-2 text-xs text-[var(--color-text-primary)] placeholder:text-[var(--color-text-secondary)] focus:outline-none focus:border-[var(--color-accent)]/40"
                 />
               </div>
+              <label className="flex items-start gap-2 text-[11px] text-[var(--color-text-secondary)] pt-1">
+                <input
+                  type="checkbox"
+                  checked={agreed}
+                  onChange={(e) => setAgreed(e.target.checked)}
+                  className="mt-0.5"
+                />
+                <span>
+                  I agree to the{' '}
+                  <button type="button" onClick={() => setLegalTab('tos')} className="text-[var(--color-accent)] hover:underline">
+                    Terms of Service
+                  </button>{' '}
+                  and{' '}
+                  <button type="button" onClick={() => setLegalTab('privacy')} className="text-[var(--color-accent)] hover:underline">
+                    Privacy Notice
+                  </button>
+                </span>
+              </label>
               <button
                 type="submit"
-                disabled={loading}
+                disabled={loading || !agreed}
                 className="w-full flex items-center justify-center gap-2 text-xs px-3 py-2 rounded-[var(--radius-global)] bg-[var(--color-accent)] text-black font-medium disabled:opacity-50 hover:opacity-90 transition-opacity"
               >
                 {loading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
@@ -200,7 +252,7 @@ export default function LoginPage() {
 
                 <button
                   onClick={handleGoogleClick}
-                  disabled={loading || !googleReady}
+                  disabled={loading || !googleReady || !agreed}
                   className="w-full flex items-center justify-center gap-2 text-xs px-3 py-2 rounded-[var(--radius-global)] border border-[var(--color-border-main)] text-[var(--color-text-primary)] disabled:opacity-50 hover:bg-[var(--color-panel-200)] transition-colors"
                 >
                   Continue with Google
@@ -244,6 +296,19 @@ export default function LoginPage() {
 
         {error && <p className="mt-3 text-[11px] text-red-400">{error}</p>}
       </div>
+
+      {legalTab && <TermsPreviewModal initialTab={legalTab} onClose={() => setLegalTab(null)} />}
     </div>
+  );
+}
+
+export default function LoginPage() {
+  // useSearchParams() (for ?ref=) requires a Suspense boundary in the App
+  // Router, or `next build` fails outright, same class of build-strictness
+  // issue as the Tailwind devDependencies fix, not optional to skip.
+  return (
+    <Suspense fallback={null}>
+      <LoginPageInner />
+    </Suspense>
   );
 }

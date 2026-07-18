@@ -35,6 +35,13 @@ JWT_SECRET = os.environ.get("JWT_SECRET", "dev-secret-key-do-not-use-in-prod")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = 24
 
+# One acceptance decision covers both the Terms of Service AND the Privacy
+# Notice (both dated with this effective date; the ToS incorporates the
+# Privacy Notice by reference). Bump this string whenever either document's
+# "Effective date" changes — every user is required to re-accept before
+# using the account again, exactly like accepting the current version once.
+CURRENT_POLICY_VERSION = "2026-07-13"
+
 _auth_tables_created = False
 
 def init_auth_tables():
@@ -51,9 +58,24 @@ def init_auth_tables():
         email TEXT UNIQUE NOT NULL,
         password_hash TEXT NOT NULL,
         created_at TEXT NOT NULL,
-        is_active BOOLEAN NOT NULL DEFAULT 1
+        is_active BOOLEAN NOT NULL DEFAULT 1,
+        tos_status TEXT NOT NULL DEFAULT 'pending',
+        tos_decided_at TEXT,
+        tos_accepted_at TEXT,
+        tos_version TEXT
     )
     """)
+    # Existing installations may already have the users table.  Keep this
+    # migration additive so every pre-existing account is asked once too.
+    columns = {row["name"] for row in cursor.execute("PRAGMA table_info(users)").fetchall()}
+    if "tos_status" not in columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN tos_status TEXT NOT NULL DEFAULT 'pending'")
+    if "tos_decided_at" not in columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN tos_decided_at TEXT")
+    if "tos_accepted_at" not in columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN tos_accepted_at TEXT")
+    if "tos_version" not in columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN tos_version TEXT")
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS login_events (
         id TEXT PRIMARY KEY,
@@ -118,15 +140,53 @@ def require_auth(f):
             user_id = payload.get('user_id')
             if not user_id:
                 raise jwt.InvalidTokenError()
-            
+
             # Store in flask.g for easy access in route handlers
             g.user_id = user_id
-            
+
+            # A declined or undecided Terms decision may only use the Terms
+            # endpoint.  This makes the restriction real even if a client is
+            # modified to reveal otherwise-hidden UI controls.
+            if request.path != "/api/auth/terms":
+                init_auth_tables()
+                conn = kdb._get_conn()
+                user = conn.execute(
+                    "SELECT tos_status, tos_version FROM users WHERE id = ?", (user_id,)
+                ).fetchone()
+                if not user:
+                    return jsonify({'success': False, 'error': 'User not found'}), 404
+                if user["tos_status"] != "accepted" or user["tos_version"] != CURRENT_POLICY_VERSION:
+                    return jsonify({
+                        'success': False,
+                        'error': 'Accept the Terms of Service and Privacy Notice to use account features',
+                        'code': 'TERMS_NOT_ACCEPTED',
+                        'tos_status': 'pending' if user["tos_version"] != CURRENT_POLICY_VERSION else user["tos_status"],
+                        'policy_version': CURRENT_POLICY_VERSION,
+                    }), 403
+
         except jwt.ExpiredSignatureError:
             return jsonify({'success': False, 'error': 'Token has expired'}), 401
         except jwt.InvalidTokenError:
             return jsonify({'success': False, 'error': 'Invalid token'}), 401
-            
+
+        # ToS enforcement: a valid token doesn't help if the account is
+        # currently timed out. Checked on every authenticated request.
+        try:
+            import moderation
+            active_timeout = moderation.get_active_timeout(user_id)
+        except Exception as e:
+            logger.error(f"[Auth] moderation check failed, failing open: {e}")
+            active_timeout = None
+
+        if active_timeout:
+            return jsonify({
+                'success':      False,
+                'error':        f"Account temporarily suspended: {active_timeout['reason']}",
+                'timeout':      True,
+                'timeout_until': active_timeout['expires_at'],
+                'category':     active_timeout['category'],
+            }), 403
+
         return f(*args, **kwargs)
     return decorated
 
@@ -164,6 +224,7 @@ def register():
     body = request.get_json(silent=True) or {}
     email = (body.get("email") or "").strip().lower()
     password = body.get("password", "")
+    ref_code = (body.get("ref") or "").strip() or None
     
     if not email or not password:
         return _err("Email and password are required")
@@ -192,6 +253,10 @@ def register():
         # Provision free trial subscription
         import subscription_manager as sm
         sm.activate_trial(user_id)
+
+        if ref_code:
+            import referrals
+            referrals.record_signup(ref_code, user_id)
         
         token = generate_token(user_id)
         _log_event(user_id, "register")
@@ -259,6 +324,60 @@ def sessions():
     rows = [dict(r) for r in cursor.fetchall()]
     return _ok({"sessions": rows})
 
+
+@auth_bp.route("/terms", methods=["GET", "PUT"])
+@require_auth
+def terms():
+    """
+    Read or record the Terms of Service + Privacy Notice decision for this
+    user. One decision covers both documents. Re-asked whenever
+    CURRENT_POLICY_VERSION changes, even for users who accepted a prior
+    version — their original acceptance record is kept, not overwritten,
+    until they decide again.
+    """
+    user_id = get_current_user_id()
+    conn = kdb._get_conn()
+    cursor = conn.cursor()
+
+    if request.method == "GET":
+        row = cursor.execute(
+            "SELECT tos_status, tos_decided_at, tos_accepted_at, tos_version FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+        if not row:
+            return _err("User not found", 404)
+        data = dict(row)
+        # Surface "pending" if they're on an outdated version, without
+        # touching the stored record of what they actually agreed to.
+        if data["tos_version"] != CURRENT_POLICY_VERSION:
+            data["tos_status"] = "pending"
+        data["current_policy_version"] = CURRENT_POLICY_VERSION
+        return _ok({"terms": data})
+
+    decision = (request.get_json(silent=True) or {}).get("decision")
+    if decision not in ("accepted", "rejected"):
+        return _err("decision must be 'accepted' or 'rejected'")
+
+    row = cursor.execute("SELECT tos_status, tos_version FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not row:
+        return _err("User not found", 404)
+    # Acceptance is a durable legal record, not a preference that can be
+    # silently revoked by a later browser request — unless a new policy
+    # version now requires a fresh decision.
+    already_current = row["tos_status"] == "accepted" and row["tos_version"] == CURRENT_POLICY_VERSION
+    if already_current and decision != "accepted":
+        return _err("Accepted Terms cannot be changed", 409)
+
+    now = datetime.now(timezone.utc).isoformat()
+    cursor.execute(
+        "UPDATE users SET tos_status = ?, tos_decided_at = ?, tos_accepted_at = ?, tos_version = ? WHERE id = ?",
+        (decision, now, now if decision == "accepted" else None, CURRENT_POLICY_VERSION, user_id),
+    )
+    conn.commit()
+    _log_event(user_id, f"terms_{decision}_v{CURRENT_POLICY_VERSION}")
+    return _ok({"terms": {"tos_status": decision, "tos_decided_at": now,
+                           "tos_accepted_at": now if decision == "accepted" else None,
+                           "tos_version": CURRENT_POLICY_VERSION}})
+
 @auth_bp.route("/me", methods=["GET"])
 @require_auth
 def me():
@@ -308,6 +427,7 @@ def oauth_issue():
 
     body  = request.get_json(silent=True) or {}
     email = (body.get("email") or "").strip().lower()
+    ref_code = (body.get("ref") or "").strip() or None
     if not email:
         return _err("email is required")
 
@@ -336,6 +456,11 @@ def oauth_issue():
 
         import subscription_manager as sm
         sm.activate_trial(user_id)
+
+        if ref_code:
+            import referrals
+            referrals.record_signup(ref_code, user_id)
+
         logger.info(f"[Auth] OAuth-created new user: {email} ({user_id})")
 
     token = generate_token(user_id)
