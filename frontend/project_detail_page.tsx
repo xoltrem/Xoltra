@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
-  FolderKanban, Github, Upload, Loader2, Trash2, RefreshCw,
+  FolderKanban, GitBranch, Upload, Loader2, Trash2, RefreshCw,
   CheckCircle2, XCircle, Clock, Layers, FileText, MessageSquare, Eye,
 } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
@@ -24,7 +24,7 @@ function SourceRow({ source }: { source: ProjectSource }) {
   return (
     <div className="flex items-center gap-3 px-3 py-2.5 border-b border-[var(--color-border-main)] last:border-b-0 text-xs">
       {source.type === 'github' ? (
-        <Github className="w-3.5 h-3.5 text-[var(--color-text-secondary)] shrink-0" />
+        <GitBranch className="w-3.5 h-3.5 text-[var(--color-text-secondary)] shrink-0" />
       ) : (
         <Upload className="w-3.5 h-3.5 text-[var(--color-text-secondary)] shrink-0" />
       )}
@@ -68,7 +68,7 @@ function AddGithubForm({ projectId, onAdded }: { projectId: string; onAdded: () 
           className="flex-1 bg-[var(--color-panel-200)] border border-[var(--color-border-main)] rounded-[var(--radius-global)] px-3 py-2 text-xs font-mono text-[var(--color-text-primary)] placeholder:text-[var(--color-text-secondary)] focus:outline-none focus:border-[var(--color-accent)]/40"
         />
         <Button size="sm" onClick={submit} disabled={busy || !url.trim()} className="gap-1.5 shrink-0">
-          {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Github className="w-3.5 h-3.5" />}
+          {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <GitBranch className="w-3.5 h-3.5" />}
           {busy ? 'Cloning...' : 'Clone'}
         </Button>
       </div>
