@@ -1,9 +1,11 @@
 'use client';
-import { useEffect, useRef, useState } from 'react';
+
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
   FolderKanban, GitBranch, Upload, Loader2, Trash2, RefreshCw,
   CheckCircle2, XCircle, Clock, Layers, FileText, MessageSquare, Eye,
+  LucideIcon
 } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { cn } from '@/lib/utils';
@@ -12,15 +14,21 @@ import {
   bootstrapProjectSession, Project, ProjectSource, ProjectCache, BootstrapPayload,
 } from '@/lib/projectsApi';
 
-const STATUS_STYLE: Record<string, { icon: any; color: string }> = {
+type StatusConfig = {
+  icon: LucideIcon;
+  color: string;
+};
+
+const STATUS_STYLE: Record<string, StatusConfig> = {
   indexed: { icon: CheckCircle2, color: 'text-[var(--color-success)]' },
   pending: { icon: Clock, color: 'text-[var(--color-warning)]' },
   error: { icon: XCircle, color: 'text-[var(--color-error)]' },
 };
 
 function SourceRow({ source }: { source: ProjectSource }) {
-  const style = STATUS_STYLE[source.status] || STATUS_STYLE.pending;
-  const Icon = style.icon;
+  const style = STATUS_STYLE[source.status] ?? STATUS_STYLE.pending;
+  const IconComponent = style.icon;
+
   return (
     <div className="flex items-center gap-3 px-3 py-2.5 border-b border-[var(--color-border-main)] last:border-b-0 text-xs">
       {source.type === 'github' ? (
@@ -31,7 +39,7 @@ function SourceRow({ source }: { source: ProjectSource }) {
       <span className="flex-1 truncate text-[var(--color-text-primary)] font-mono">{source.ref}</span>
       <span className="text-[var(--color-text-secondary)]">{source.file_count} files</span>
       <span className={cn('flex items-center gap-1', style.color)}>
-        <Icon className="w-3 h-3" /> {source.status}
+        <IconComponent className="w-3 h-3" /> {source.status}
       </span>
     </div>
   );
@@ -50,8 +58,9 @@ function AddGithubForm({ projectId, onAdded }: { projectId: string; onAdded: () 
       await addGithubSource(projectId, url.trim());
       setUrl('');
       onAdded();
-    } catch (e: any) {
-      setError(e.message);
+    } catch (e: unknown) {
+      const err = e as Error;
+      setError(err.message || 'Failed to clone repository');
     } finally {
       setBusy(false);
     }
@@ -90,8 +99,9 @@ function UploadButton({ projectId, onAdded }: { projectId: string; onAdded: () =
     try {
       await addUploadSource(projectId, files);
       onAdded();
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      const errorObj = err as Error;
+      setError(errorObj.message || 'Upload failed');
     } finally {
       setBusy(false);
       if (inputRef.current) inputRef.current.value = '';
@@ -124,6 +134,7 @@ function CacheSection({ cache }: { cache: ProjectCache | null }) {
       </p>
     );
   }
+
   return (
     <div className="space-y-3">
       {cache.structure_summary && (
@@ -163,28 +174,30 @@ export default function ProjectDetailPage() {
   const [preview, setPreview] = useState<BootstrapPayload | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false);
 
-  const load = () => {
+  const load = useCallback(() => {
+    if (!projectId) return;
+    setError('');
     getProject(projectId)
       .then((r) => {
         setProject(r.project);
         setSources(r.sources);
         setCache(r.cache);
       })
-      .catch((e) => setError(e.message));
-  };
+      .catch((e: Error) => setError(e.message || 'Failed to load project details'));
+  }, [projectId]);
 
   useEffect(() => {
     load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId]);
+  }, [load]);
 
   const remove = async () => {
     if (!confirm(`Delete "${project?.name}"? This removes all sources and cached context.`)) return;
     try {
       await deleteProject(projectId);
       router.push('/projects');
-    } catch (e: any) {
-      setError(e.message);
+    } catch (e: unknown) {
+      const err = e as Error;
+      setError(err.message || 'Failed to delete project');
     }
   };
 
@@ -194,8 +207,9 @@ export default function ProjectDetailPage() {
     try {
       const r = await bootstrapProjectSession(projectId);
       setPreview(r);
-    } catch (e: any) {
-      setError(e.message);
+    } catch (e: unknown) {
+      const err = e as Error;
+      setError(err.message || 'Failed to load preview');
     } finally {
       setPreviewBusy(false);
     }
@@ -204,6 +218,7 @@ export default function ProjectDetailPage() {
   if (error && !project) {
     return <div className="p-6 text-sm text-[var(--color-error)]">{error}</div>;
   }
+
   if (!project) {
     return <div className="p-6 text-sm text-[var(--color-text-secondary)]">Loading...</div>;
   }
@@ -296,8 +311,8 @@ export default function ProjectDetailPage() {
                     Recent conversation digests
                   </div>
                   {preview.conversation_digests?.length ? (
-                    preview.conversation_digests.map((d, i) => (
-                      <p key={i} className="text-[var(--color-text-secondary)] mb-1">
+                    preview.conversation_digests.map((d, index) => (
+                      <p key={d.id ?? index} className="text-[var(--color-text-secondary)] mb-1">
                         • {d.summary}
                       </p>
                     ))
