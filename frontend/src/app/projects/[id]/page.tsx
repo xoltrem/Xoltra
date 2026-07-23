@@ -308,7 +308,7 @@ export default function ProjectDetailPage() {
                   </div>
                   {preview.conversation_digests?.length ? (
                     preview.conversation_digests.map((d, index) => (
-                      <p key={d.id ?? index} className="text-[var(--color-text-secondary)] mb-1">
+                      <p key={d.conversation_id ?? index} className="text-[var(--color-text-secondary)] mb-1">
                         • {d.summary}
                       </p>
                     ))
