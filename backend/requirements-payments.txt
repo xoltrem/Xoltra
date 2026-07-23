@@ -1,0 +1,11 @@
+# Standalone service (stripe_main.py + nightly_split.py) — NOT deployed yet,
+# not part of the main Flask app's requirements.txt. Install separately if
+# you deploy this as its own service:
+#   pip install -r requirements-payments.txt
+fastapi
+uvicorn
+stripe
+pydantic
+psycopg2-binary
+PyJWT
+requests

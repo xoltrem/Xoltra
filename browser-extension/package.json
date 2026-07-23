@@ -1,0 +1,23 @@
+{
+  "name": "xoltra-companion-extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Xoltra Companion — browser extension for launching, inspecting, and overriding Xoltra workflows from any page.",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.287",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "esbuild": "^0.24.0",
+    "typescript": "^5"
+  }
+}

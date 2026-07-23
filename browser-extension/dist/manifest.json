@@ -1,0 +1,44 @@
+{
+  "manifest_version": 3,
+  "name": "Xoltra Companion",
+  "version": "0.1.0",
+  "description": "Launch, inspect, and override Xoltra workflows from any page. Capture page context and turn it into automations.",
+  "minimum_chrome_version": "120",
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Xoltra Companion — open side panel"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "options_page": "options.html",
+  "permissions": [
+    "storage",
+    "sidePanel",
+    "activeTab",
+    "scripting",
+    "notifications",
+    "contextMenus"
+  ],
+  "host_permissions": [
+    "http://localhost:5001/*",
+    "http://localhost:10000/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ],
+  "commands": {
+    "_execute_action": {
+      "suggested_key": { "default": "Alt+X" },
+      "description": "Open the Xoltra Companion side panel"
+    },
+    "capture-page": {
+      "suggested_key": { "default": "Alt+Shift+X" },
+      "description": "Capture the current page as workflow context"
+    }
+  }
+}

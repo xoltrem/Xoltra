@@ -1,0 +1,13 @@
+flask
+flask-cors
+cohere
+chromadb
+pypdf
+python-dotenv
+requests
+upstash-redis
+boto3
+apscheduler
+reportlab
+cryptography
+pytest

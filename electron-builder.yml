@@ -1,0 +1,22 @@
+appId: com.yourapp.desktop
+asar: true          # app source code packed into app.asar, not browsable as loose files
+asarUnpack: []       # nothing unpacked — no raw .js visible on disk
+
+directories:
+  output: dist
+  buildResources: build
+
+# Only these three folders exist as real, browsable directories
+# next to the executable. Everything else (main/preload/renderer code)
+# lives inside app.asar.
+files:
+  - "electron/**/*"
+  - "!electron/**/*.map"
+
+extraResources:
+  - from: "frontend"
+    to: "frontend"
+  - from: "userdata"
+    to: "userdata"
+  - from: "memory"
+    to: "memory"

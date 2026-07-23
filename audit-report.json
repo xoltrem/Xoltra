@@ -1,0 +1,74 @@
+{
+  "scanned_at": "2026-07-21T16:58:19.371Z",
+  "root": "C:\\Users\\jisha\\Downloads\\jishapitest",
+  "totals": {
+    "info": 3,
+    "low": 3,
+    "pass": 3
+  },
+  "findings": [
+    {
+      "id": 1,
+      "severity": "info",
+      "category": "inventory",
+      "message": "scanned 252 files, 170 source files"
+    },
+    {
+      "id": 2,
+      "severity": "low",
+      "category": "incomplete",
+      "message": "unfinished work marker",
+      "file": "frontend\\src\\app\\tools\\page.tsx",
+      "line": 7,
+      "snippet": "// TODO: replace with GET /api/tools once the backend tool registry exists"
+    },
+    {
+      "id": 3,
+      "severity": "low",
+      "category": "incomplete",
+      "message": "unfinished work marker",
+      "file": "frontend\\src\\app\\tools\\page.tsx",
+      "line": 116,
+      "snippet": "// TODO: POST /api/tools/{id}/toggle  { enabled: v }"
+    },
+    {
+      "id": 4,
+      "severity": "low",
+      "category": "incomplete",
+      "message": "unfinished work marker",
+      "file": "frontend\\src\\components\\layout\\Sidebar.tsx",
+      "line": 44,
+      "snippet": "const unityConnected = false; // TODO: Wire to real unity connection status once backend simulation engine is attached"
+    },
+    {
+      "id": 5,
+      "severity": "info",
+      "category": "inventory",
+      "message": "server detected: node=true python=false secure-api-protocol=true"
+    },
+    {
+      "id": 6,
+      "severity": "pass",
+      "category": "connectivity",
+      "message": "health endpoint reachable"
+    },
+    {
+      "id": 7,
+      "severity": "pass",
+      "category": "security_layer2",
+      "message": "request without signature correctly rejected (401)"
+    },
+    {
+      "id": 8,
+      "severity": "info",
+      "category": "security_layer2",
+      "message": "signature check active (rejected scan.js probe signature as expected — scan.js does not hold MASTER_KEY by design)"
+    },
+    {
+      "id": 9,
+      "severity": "pass",
+      "category": "security_layer2",
+      "message": "nonce replay correctly rejected on second use"
+    }
+  ]
+}
