@@ -2,7 +2,7 @@
   "version": 2,
   "buildCommand": "next build",
   "outputDirectory": "next.js default",
-  "installCommand": npm install --legacy-peer-deps",
+  "installCommand": "npm install --legacy-peer-deps",
   "framework": "nextjs",
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api/$1" }
