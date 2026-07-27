@@ -22,8 +22,10 @@ from agents import (
     ValidatorAgent, CompilerAgent, PDFExtractorAgent, QAAgent,
     CoachAgent, CodingAgent
 )
-from roles import get_role_preamble
+from roles import get_role_preamble, get_role
 from llm import apply_tier, is_agent_active, get_active_tier
+import agent_chain as ac
+import token_budget as tb
 import subscription_manager as sm
 
 logger = logging.getLogger(__name__)
@@ -122,6 +124,63 @@ class WorkflowPipeline:
         logger.info(f"[Pipeline] {tier['label']} tier active — {tier['agent_count']} agents")
 
         return router_data
+
+    # ─────────────────────────────────────────────
+    # INTERNAL: custom chain + budget
+    # ─────────────────────────────────────────────
+    def _load_chain(self, user_id: str):
+        """
+        Returns the user's saved chain, or None when they never customized it
+        (in which case tier gating is used, exactly as before).
+        """
+        try:
+            detail = ac.get_chain_detail(user_id)
+            if not detail["customized"]:
+                return None
+            return [s["id"] for s in detail["slots"]]
+        except Exception as e:
+            logger.warning(f"[Pipeline] chain load failed ({e}) — using tier defaults")
+            return None
+
+    def _start_budget(self, user_id: str, chain):
+        try:
+            slots  = chain or sorted(get_active_tier()["agents"])
+            budget = tb.budget_for_user(user_id, slots)
+            tb.set_active_budget(budget)
+            return budget
+        except Exception as e:
+            logger.warning(f"[Pipeline] budget init failed: {e}")
+            return None
+
+    def _run_role_slots(self, user_id: str, chain, blueprint: dict,
+                        goal: str, result: dict, step) -> dict:
+        """
+        Runs every role-backed slot in the chain (e.g. a Business Consultant
+        dropped in where Validator used to be). Each role reviews/refines the
+        blueprint using its own preamble from roles.py.
+        """
+        if not chain:
+            return blueprint
+        for slot in chain:
+            if not ac.is_role_slot(slot):
+                continue
+            role = get_role(ac.role_id_of(slot))
+            if not role:
+                continue
+            label = role["name"]
+            step(label)
+            result["agents_used"].append(label)
+            try:
+                blueprint = self.operator.run(
+                    user_id, blueprint,
+                    issues=[f"Review this plan as a {label}: "
+                            f"{role['description']}"],
+                    original_goal=goal,
+                    role_preamble=role["preamble"],
+                ) or blueprint
+            except Exception as e:
+                logger.warning(f"[Pipeline] role slot {slot} failed: {e}")
+        return blueprint
 
     # ─────────────────────────────────────────────
     # PUBLIC: get clarifying questions
@@ -318,6 +377,19 @@ class WorkflowPipeline:
 
         result = _base_result(mode, role_id, complexity)
 
+        # ─── CUSTOM CHAIN + PASSIVE TOKEN BUDGET ──────
+        chain  = self._load_chain(user_id)
+        budget = self._start_budget(user_id, chain)
+        result["chain"] = list(chain) if chain else None
+
+        def active(agent_name: str) -> bool:
+            """Chain membership wins when the user customized their pipeline."""
+            if not chain:
+                return is_agent_active(agent_name)
+            if agent_name in ac.CRITICAL_STAGES:
+                return True
+            return agent_name in chain
+
         if mode == "coach":
             step("Coach")
             result["agents_used"].append("Coach")
@@ -338,7 +410,7 @@ class WorkflowPipeline:
         try:
             # ─── KNOWLEDGE (Deep tier only) ───────────────
             context_nodes = None
-            if self.knowledge_enabled and is_agent_active("knowledge_retriever"):
+            if self.knowledge_enabled and active("knowledge_retriever"):
                 step("Knowledge check")
                 try:
                     dup_check = ka.check_before_create(user_id, goal)
@@ -379,12 +451,12 @@ class WorkflowPipeline:
                     logger.warning(f"[Pipeline] Knowledge check failed (continuing): {e}")
 
             # ─── CLARIFIER (Standard + Deep) ──────────────
-            if is_agent_active("clarifier"):
+            if active("clarifier"):
                 step("Clarifier")
                 result["agents_used"].append("Clarifier")
 
             # ─── ARCHITECT (Standard + Deep) ──────────────
-            if not is_agent_active("architect"):
+            if not active("architect"):
                 # ⚡ Fast tier — go straight to QA
                 step("QA (fast tier)")
                 result["agents_used"].append("QA")
@@ -410,7 +482,7 @@ class WorkflowPipeline:
 
             # ─── CRITIC (Standard + Deep) ─────────────────
             critique = {"status": "pass", "issues": []}
-            if is_agent_active("critic"):
+            if active("critic"):
                 step("Critic")
                 result["agents_used"].append("Critic")
                 try:
@@ -424,7 +496,7 @@ class WorkflowPipeline:
             result["critic_issues"] = critique.get("issues", [])
 
             # ─── OPERATOR (Deep only) ─────────────────────
-            if (is_agent_active("operator")
+            if (active("operator")
                     and critique.get("status") == "fail"
                     and critique.get("issues")):
                 step("Operator")
@@ -439,13 +511,13 @@ class WorkflowPipeline:
                 except Exception as e:
                     logger.warning(f"[Pipeline] Operator failed: {e}")
             else:
-                if not is_agent_active("operator"):
+                if not active("operator"):
                     step("Operator skipped (tier)")
                 else:
                     step("Operator skipped (no issues)")
 
             # ─── AUDITOR (Deep only) ──────────────────────
-            if is_agent_active("auditor"):
+            if active("auditor"):
                 step("Auditor")
                 result["agents_used"].append("Auditor")
                 try:
@@ -457,7 +529,7 @@ class WorkflowPipeline:
 
             # ─── VALIDATOR (Standard + Deep) ──────────────
             validation = {"status": "pass"}
-            if is_agent_active("validator"):
+            if active("validator"):
                 step("Validator")
                 result["agents_used"].append("Validator")
                 try:
@@ -471,6 +543,11 @@ class WorkflowPipeline:
                     f"Validation failed: {validation.get('reason', 'Schema error')}",
                     mode, role_id, complexity
                 )
+
+            # ─── CUSTOM ROLE SLOTS ────────────────────────
+            blueprint = self._run_role_slots(
+                user_id, chain, blueprint, goal, result, step
+            )
 
             result["output_parsed"] = blueprint
 
@@ -490,9 +567,11 @@ class WorkflowPipeline:
 
             result["output"]  = compiled
             result["success"] = True
+            if budget is not None:
+                result["token_budget"] = budget.report()
 
             # ─── KNOWLEDGE STORAGE (Deep only) ────────────
-            if self.knowledge_enabled and is_agent_active("knowledge_retriever"):
+            if self.knowledge_enabled and active("knowledge_retriever"):
                 step("Storing in knowledge base")
                 try:
                     goal_id     = kdb.create_node(

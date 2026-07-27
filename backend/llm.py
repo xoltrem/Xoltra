@@ -318,6 +318,13 @@ def clear_usage_context() -> None:
 
 def _record_usage(role: str, model_name: str, usage_sink: dict) -> None:
     tokens = int(usage_sink.get("input_tokens", 0)) + int(usage_sink.get("output_tokens", 0))
+
+    try:  # passive per-agent budget tracking; never affects the response
+        import token_budget
+        token_budget.note_usage(role, tokens)
+    except Exception:
+        pass
+
     user_id = _usage_user_id.get()
     if not user_id or tokens <= 0:
         return

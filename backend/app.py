@@ -88,6 +88,9 @@ register_workspace_routes(app)
 
 register_digest_routes(app)
 
+from agent_chain_routes import register_agent_chain_routes
+register_agent_chain_routes(app)
+
 pipeline = get_pipeline()
 
 
