@@ -91,6 +91,21 @@ register_digest_routes(app)
 from agent_chain_routes import register_agent_chain_routes
 register_agent_chain_routes(app)
 
+from mcp_server import create_mcp_blueprint, generate_manifest
+app.register_blueprint(create_mcp_blueprint())
+
+from collaboration import register_collaboration_routes
+register_collaboration_routes(app)
+
+from supabase_paywall import register_paywall_routes
+register_paywall_routes(app)
+
+@app.route("/api/mcp/manifest", methods=["GET"])
+def mcp_manifest():
+    """Auto-discovery manifest for IDEs (Codex, Antigravity, VS Code)."""
+    port = int(os.getenv("PORT", 5001))
+    return jsonify(generate_manifest(port=port))
+
 pipeline = get_pipeline()
 
 
