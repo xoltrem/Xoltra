@@ -24,6 +24,9 @@
     "tailwindcss": "^4",
     "zod": "^4.4.3",
     "zustand": "^5.0.14"
+    "db:push": "drizzle-kit push",
+  "db:studio": "drizzle-kit studio",
+  "db:generate": "drizzle-kit generate"
   },
   "devDependencies": {
     "@types/node": "^20",
