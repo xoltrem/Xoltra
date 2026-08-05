@@ -1,9 +1,14 @@
 import "server-only";
-import { drizzle } from "drizzle-orm/vercel-postgres";
-import { sql } from "@vercel/postgres";
+import { drizzle } from "drizzle-orm/node-postgres";
+import { Pool } from "pg";
+
 import { serverEnv } from "./env";
 import * as schema from "./schema";
 
-void serverEnv; // throws at import time if env is misconfigured
+void serverEnv;
 
-export const db = drizzle(sql, { schema });
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+});
+
+export const db = drizzle(pool, { schema });
