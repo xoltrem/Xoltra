@@ -2,8 +2,8 @@ import "server-only";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 
-import { serverEnv } from "./env";
-import * as schema from "./schema";
+import { serverEnv } from "./src/lib/env";
+import * as schema from "./src/lib/schema";
 
 void serverEnv;
 
