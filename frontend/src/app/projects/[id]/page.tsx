@@ -132,6 +132,7 @@ function CacheSection({ cache }: { cache: ProjectCache | null }) {
       </p>
     );
   }
+
   return (
     <div className="space-y-3">
       {cache.structure_summary && (
@@ -144,6 +145,7 @@ function CacheSection({ cache }: { cache: ProjectCache | null }) {
           </pre>
         </div>
       )}
+
       {cache.key_docs_summary && (
         <div>
           <div className="text-[10px] uppercase tracking-wider text-[var(--color-text-secondary)] mb-1">
@@ -189,6 +191,7 @@ export default function ProjectDetailPage() {
 
   const remove = async () => {
     if (!confirm(`Delete "${project?.name}"? This removes all sources and cached context.`)) return;
+
     try {
       await deleteProject(projectId);
       router.push('/projects');
@@ -201,6 +204,7 @@ export default function ProjectDetailPage() {
   const openPreview = async () => {
     setPreviewOpen(true);
     setPreviewBusy(true);
+
     try {
       const r = await bootstrapProjectSession(projectId);
       setPreview(r);
@@ -215,6 +219,7 @@ export default function ProjectDetailPage() {
   if (error && !project) {
     return <div className="p-6 text-sm text-[var(--color-error)]">{error}</div>;
   }
+
   if (!project) {
     return <div className="p-6 text-sm text-[var(--color-text-secondary)]">Loading...</div>;
   }
@@ -224,17 +229,23 @@ export default function ProjectDetailPage() {
       <div className="flex items-start justify-between gap-4">
         <div className="flex items-center gap-2 min-w-0">
           <FolderKanban className="w-5 h-5 text-[var(--color-accent)] shrink-0" />
+
           <div className="min-w-0">
             <h1 className="text-xl font-semibold tracking-tight truncate">{project.name}</h1>
+
             {project.goals && (
-              <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">{project.goals}</p>
+              <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">
+                {project.goals}
+              </p>
             )}
           </div>
         </div>
+
         <div className="flex gap-2 shrink-0">
           <Button size="sm" variant="outline" className="gap-1.5" onClick={openPreview}>
             <Eye className="w-3.5 h-3.5" /> Preview session context
           </Button>
+
           <Button size="sm" variant="destructive" className="gap-1.5" onClick={remove}>
             <Trash2 className="w-3.5 h-3.5" /> Delete
           </Button>
@@ -248,7 +259,11 @@ export default function ProjectDetailPage() {
           <div className="flex items-center gap-1.5 text-sm font-medium">
             <Layers className="w-3.5 h-3.5" /> Sources
           </div>
-          <button onClick={load} className="text-[var(--color-text-secondary)] hover:text-white transition-colors">
+
+          <button
+            onClick={load}
+            className="text-[var(--color-text-secondary)] hover:text-white transition-colors"
+          >
             <RefreshCw className="w-3.5 h-3.5" />
           </button>
         </div>
@@ -273,6 +288,7 @@ export default function ProjectDetailPage() {
         <div className="flex items-center gap-1.5 text-sm font-medium mb-3">
           <FileText className="w-3.5 h-3.5" /> Context cache
         </div>
+
         <CacheSection cache={cache} />
       </div>
 
@@ -288,6 +304,7 @@ export default function ProjectDetailPage() {
             <div className="flex items-center gap-1.5 text-sm font-medium mb-3">
               <MessageSquare className="w-3.5 h-3.5 text-[var(--color-accent)]" /> What a new chat loads automatically
             </div>
+
             {previewBusy ? (
               <div className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)]">
                 <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading...
@@ -298,17 +315,23 @@ export default function ProjectDetailPage() {
                   <div className="text-[10px] uppercase tracking-wider text-[var(--color-text-secondary)] mb-1">
                     Structure
                   </div>
+
                   <pre className="bg-[#0d0d0d] border border-[var(--color-border-main)] rounded p-2 font-mono whitespace-pre-wrap">
                     {preview.structure_summary || '—'}
                   </pre>
                 </div>
+
                 <div>
                   <div className="text-[10px] uppercase tracking-wider text-[var(--color-text-secondary)] mb-1">
                     Recent conversation digests
                   </div>
+
                   {preview.conversation_digests?.length ? (
                     preview.conversation_digests.map((d, index) => (
-                      <p key={d.id ?? index} className="text-[var(--color-text-secondary)] mb-1">
+                      <p
+                        key={index}
+                        className="text-[var(--color-text-secondary)] mb-1"
+                      >
                         • {d.summary}
                       </p>
                     ))
@@ -318,7 +341,13 @@ export default function ProjectDetailPage() {
                 </div>
               </div>
             ) : null}
-            <Button size="sm" variant="outline" className="mt-4 w-full" onClick={() => setPreviewOpen(false)}>
+
+            <Button
+              size="sm"
+              variant="outline"
+              className="mt-4 w-full"
+              onClick={() => setPreviewOpen(false)}
+            >
               Close
             </Button>
           </div>
